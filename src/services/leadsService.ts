@@ -1,0 +1,370 @@
+import { Lead, CommunicationRecord, Opportunity } from '../types/index';
+import { supabase } from '../lib/supabaseClient';
+import { opportunityService } from './opportunityService';
+import { accessControlService } from './accessControlService';
+
+
+export const leadsService = {
+  // Fetch paginated leads with role-based filtering
+  // ✅ ADMIN ACCESS: Admins see ALL leads from all users
+  // ✅ REGULAR USERS: See their own leads + leads from users who granted access + assignee leads
+  async getLeads(userId: string, page: number, limit: number = 10): Promise<{ data: Lead[]; total: number }> {
+    const start = (page - 1) * limit;
+    const end = start + limit - 1;
+
+    // Get user data to check if they are admin
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    
+    if (authError || !user) {
+      console.warn('No authenticated user, limiting access to data');
+      // If no authenticated user, only return empty results
+      return { data: [], total: 0 };
+    }
+    
+    const isAdmin = user.user_metadata?.role === 'admin';
+
+    let query = supabase
+      .from('leads')
+      .select('*', { count: 'exact' });
+    
+    // ✅ KEY LOGIC: Apply access control based on user role
+    if (!isAdmin) {
+      // For non-admin users, get all user IDs they can access data for
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      query = query.in('user_id', accessibleUserIds);
+    }
+    // Admins get to see ALL leads regardless of who created them (no filter)
+    
+    query = query
+      .order('created_at', { ascending: false })
+      .range(start, end);
+
+    const { data, error, count } = await query;
+
+    if (error) throw new Error(error.message);
+    return { data: data as Lead[], total: count || 0 };
+  },
+
+  async getAllLeadsForSelection(userId: string): Promise<{ id: string; name: string }[]> {
+    // Get user data to check if they are admin
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    
+    if (authError || !user) {
+      console.warn('No authenticated user, returning empty leads selection');
+      return [];
+    }
+    
+    const isAdmin = user.user_metadata?.role === 'admin';
+
+    let query = supabase
+      .from('leads')
+      .select('id, name');
+    
+    // Apply access control based on user role
+    if (!isAdmin) {
+      // For non-admin users, get all user IDs they can access data for
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      query = query.in('user_id', accessibleUserIds);
+    }
+    // Admins get to see ALL leads (no filter)
+    
+    query = query.order('name');
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error fetching leads for selection:', error);
+      throw new Error(error.message);
+    }
+    return data || [];
+  },
+
+  // Create a new lead
+  async createLead(leadData: Partial<Lead>, userId: string): Promise<Lead> {
+    // Get the correct user ID from the users table
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    
+    if (authError || !user) {
+      throw new Error('Authentication failed. Please sign in again.');
+    }
+    
+    console.log('Creating lead - Auth user ID:', user.id);
+    
+    // Add defensive check for user ID
+    if (!user.id) {
+      throw new Error('Invalid user session. Please sign in again.');
+    }
+    
+    // Declare publicUser outside try-catch to make it accessible later
+    let publicUser: any;
+    
+    try {
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('auth_user_id', user.id)
+        .single();
+      
+      console.log('User lookup result:', { userData, userError });
+      
+      if (userError) {
+        console.error('User lookup error details:', {
+          message: userError.message,
+          details: userError.details,
+          hint: userError.hint,
+          code: userError.code
+        });
+        
+        // If it's a 406 error or PGRST116 (no rows), provide more specific guidance
+        if (userError.code === 'PGRST116') {
+          throw new Error('Your user profile was not found in the database. Please contact an administrator to set up your account.');
+        }
+        
+        throw new Error(`Failed to lookup user profile: ${userError.message}`);
+      }
+      
+      if (!userData) {
+        throw new Error('User profile not found in database. Please ensure your account is properly set up.');
+      }
+      
+      // Assign the user data to the outer scope variable
+      publicUser = userData;
+    } catch (error) {
+      console.error('Error in createLead user lookup:', error);
+      throw error;
+    }
+    
+    const newLead = {
+      ...leadData,
+      user_id: publicUser.id, // Use the public.users ID instead of auth user ID
+      created_at: new Date().toISOString(),
+      status: leadData.status || 'new',
+      score: leadData.score || 0,
+      tags: leadData.tags || [],
+      assigned_to: leadData.assigned_to || null // Ensure null instead of empty string
+    };
+
+    const { data, error } = await supabase
+      .from('leads')
+      .insert([newLead])
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    const newOpportunity: Partial<Opportunity> = {
+      name: `${data.name}'s Opportunity`,
+      lead_id: data.id,
+      value: 0,
+      currency: 'INR',
+      stage: 'prospecting',
+      probability: 10,
+      expected_close_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      assigned_to: data.assigned_to || publicUser.id,
+      description: `Opportunity automatically created for lead: ${data.name}`,
+      tags: data.tags,
+    };
+    await opportunityService.createOpportunity(newOpportunity, userId);
+
+    return data as Lead;
+  },
+
+  // Update an existing lead (allow updating leads user has access to)
+  async updateLead(leadId: string, leadData: Partial<Lead>, userId: string): Promise<Lead> {
+    // Get user data to check if they are admin
+    const { data: { user } } = await supabase.auth.getUser();
+    const isAdmin = user?.user_metadata?.role === 'admin';
+    
+    let query = supabase
+      .from('leads')
+      .update(leadData)
+      .eq('id', leadId);
+    
+    // Apply access control based on user role
+    if (!isAdmin) {
+      // For non-admin users, only allow updating leads they have access to
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      query = query.in('user_id', accessibleUserIds);
+    }
+    // Admins can update any lead (no additional filter)
+    
+    query = query.select().single();
+    const { data, error } = await query;
+
+    if (error) throw new Error(error.message);
+    return data as Lead;
+  },
+
+  // Delete a lead (allow deleting leads user has access to)
+  async deleteLead(leadId: string, userId: string): Promise<void> {
+    // Get user data to check if they are admin
+    const { data: { user } } = await supabase.auth.getUser();
+    const isAdmin = user?.user_metadata?.role === 'admin';
+    
+    // Get accessible user IDs for access control
+    let accessibleUserIds: string[] = [];
+    if (!isAdmin) {
+      accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+    }
+    
+    // First, delete related opportunities to avoid foreign key constraint issues
+    let opportunityQuery = supabase
+      .from('opportunities')
+      .delete()
+      .eq('lead_id', leadId);
+    
+    if (!isAdmin) {
+      opportunityQuery = opportunityQuery.in('user_id', accessibleUserIds);
+    }
+    
+    const { error: opportunityError } = await opportunityQuery;
+    
+    if (opportunityError) {
+      console.warn('Failed to delete related opportunities:', opportunityError.message);
+      // Continue with lead deletion even if opportunity deletion fails
+    }
+
+    // Delete related communications
+    let communicationQuery = supabase
+      .from('communications')
+      .delete()
+      .eq('lead_id', leadId);
+    
+    if (!isAdmin) {
+      communicationQuery = communicationQuery.in('user_id', accessibleUserIds);
+    }
+    
+    const { error: communicationError } = await communicationQuery;
+    
+    if (communicationError) {
+      console.warn('Failed to delete related communications:', communicationError.message);
+      // Continue with lead deletion even if communication deletion fails
+    }
+
+    // Finally, delete the lead itself
+    let leadQuery = supabase
+      .from('leads')
+      .delete()
+      .eq('id', leadId);
+    
+    if (!isAdmin) {
+      leadQuery = leadQuery.in('user_id', accessibleUserIds);
+    }
+    
+    const { error } = await leadQuery;
+
+    if (error) throw new Error(error.message);
+  },
+
+  // Fetch communications for a lead (show communications user has access to)
+  async getCommunications(leadId: string, userId: string): Promise<CommunicationRecord[]> {
+    // Get user data to check if they are admin
+    const { data: { user } } = await supabase.auth.getUser();
+    const isAdmin = user?.user_metadata?.role === 'admin';
+    
+    let query = supabase
+      .from('communications')
+      .select('*')
+      .eq('lead_id', leadId);
+    
+    // Apply access control based on user role
+    if (!isAdmin) {
+      // For non-admin users, only show communications they have access to
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      query = query.in('user_id', accessibleUserIds);
+    }
+    // Admins can see all communications (no additional filter)
+    
+    query = query.order('timestamp', { ascending: false });
+    const { data, error } = await query;
+
+    if (error) throw new Error(error.message);
+    return data as CommunicationRecord[];
+  },
+
+  // Create a new communication
+  async createCommunication(communicationData: Partial<CommunicationRecord>, userId: string): Promise<CommunicationRecord> {
+    const newCommunication = {
+      ...communicationData,
+      user_id: userId,
+      timestamp: new Date().toISOString()
+    };
+
+    const { data, error } = await supabase
+      .from('communications')
+      .insert([newCommunication])
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+    return data as CommunicationRecord;
+  },
+
+  // Subscribe to real-time lead updates (access-controlled)
+  async subscribeToLeads(userId: string, callback: (payload: any) => void) {
+    // Get user data to check if they are admin
+    const { data: { user } } = await supabase.auth.getUser();
+    const isAdmin = user?.user_metadata?.role === 'admin';
+    
+    if (isAdmin) {
+      // Admins subscribe to all leads changes
+      return supabase
+        .channel(`leads-changes-admin-${userId}`)
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'leads'
+          // No filter - admins see all changes
+        }, callback)
+        .subscribe();
+    } else {
+      // For non-admin users, get accessible user IDs and create filters
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      
+      // Create multiple subscriptions for each accessible user ID
+      // Note: Supabase RLS filters work with OR logic when multiple filters are applied
+      return supabase
+        .channel(`leads-changes-${userId}`)
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'leads',
+          filter: `user_id=in.(${accessibleUserIds.join(',')})`
+        }, callback)
+        .subscribe();
+    }
+  },
+
+  // Subscribe to real-time communication updates (access-controlled)
+  async subscribeToCommunications(userId: string, callback: (payload: any) => void) {
+    // Get user data to check if they are admin
+    const { data: { user } } = await supabase.auth.getUser();
+    const isAdmin = user?.user_metadata?.role === 'admin';
+    
+    if (isAdmin) {
+      // Admins subscribe to all communications changes
+      return supabase
+        .channel(`communications-changes-admin-${userId}`)
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'communications'
+          // No filter - admins see all changes
+        }, callback)
+        .subscribe();
+    } else {
+      // For non-admin users, get accessible user IDs and create filters
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      
+      return supabase
+        .channel(`communications-changes-${userId}`)
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'communications',
+          filter: `user_id=in.(${accessibleUserIds.join(',')})`
+        }, callback)
+        .subscribe();
+    }
+  }
+};
