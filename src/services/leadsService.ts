@@ -152,46 +152,129 @@ export const leadsService = {
 
     if (error) throw new Error(error.message);
 
-    const newOpportunity: Partial<Opportunity> = {
-      name: `${data.name}'s Opportunity`,
-      lead_id: data.id,
-      value: 0,
-      currency: 'INR',
-      stage: 'prospecting',
-      probability: 10,
-      expected_close_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      assigned_to: data.assigned_to || publicUser.id,
-      description: `Opportunity automatically created for lead: ${data.name}`,
-      tags: data.tags,
-    };
-    await opportunityService.createOpportunity(newOpportunity, userId);
+    // Auto-create corresponding opportunity
+    try {
+      const newOpportunity: Partial<Opportunity> = {
+        name: `${data.name}'s Opportunity`,
+        lead_id: data.id,
+        value: 0,
+        currency: 'INR',
+        stage: 'prospecting',
+        probability: 10,
+        expected_close_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        assigned_to: data.assigned_to || publicUser.id,
+        description: `Opportunity automatically created for lead: ${data.name}`,
+        tags: data.tags,
+        user_id: publicUser.id,
+        created_at: new Date().toISOString()
+      };
+      
+      console.log('Creating opportunity for lead:', data.id);
+      await opportunityService.createOpportunity(newOpportunity, publicUser.id);
+      console.log('Opportunity created successfully');
+    } catch (opportunityError) {
+      console.error('Failed to create opportunity for lead:', opportunityError);
+      // Don't throw error here - lead creation should succeed even if opportunity fails
+    }
 
     return data as Lead;
   },
 
   // Update an existing lead (allow updating leads user has access to)
   async updateLead(leadId: string, leadData: Partial<Lead>, userId: string): Promise<Lead> {
+    console.log('🔄 UPDATE LEAD DEBUG - Starting update process');
+    console.log('📝 Lead ID:', leadId);
+    console.log('📝 Raw Lead Data:', JSON.stringify(leadData, null, 2));
+    console.log('📝 User ID passed:', userId);
+    
     // Get user data to check if they are admin
     const { data: { user } } = await supabase.auth.getUser();
     const isAdmin = user?.user_metadata?.role === 'admin';
     
+    console.log('👤 Auth User:', user?.id);
+    console.log('🔑 Is Admin:', isAdmin);
+    
+    // Get the public.users table ID for the current auth user
+    let publicUserId = userId; // Default to passed userId
+    
+    if (user) {
+      try {
+        const { data: publicUser, error: publicUserError } = await supabase
+          .from('users')
+          .select('id')
+          .eq('auth_user_id', user.id)
+          .single();
+          
+        if (!publicUserError && publicUser) {
+          publicUserId = publicUser.id; // Use public.users ID
+          console.log('✅ Mapped to public user ID:', publicUserId);
+        } else {
+          console.warn('❌ Failed to map to public user:', publicUserError);
+        }
+      } catch (error) {
+        console.warn('Could not map auth user to public user for access control:', error);
+      }
+    }
+    
+    // Clean the data to ensure it matches the database schema
+    const cleanedData = {
+      ...leadData,
+      // Ensure score is a number
+      score: typeof leadData.score === 'string' ? parseInt(leadData.score) || 0 : leadData.score,
+      // Ensure assigned_to is either a valid UUID or null
+      assigned_to: leadData.assigned_to === '' ? null : leadData.assigned_to,
+      // Ensure tags is an array
+      tags: Array.isArray(leadData.tags) ? leadData.tags : (leadData.tags ? [leadData.tags] : []),
+      // Remove any undefined or invalid fields
+      ...(leadData.name !== undefined && { name: leadData.name }),
+      ...(leadData.email !== undefined && { email: leadData.email }),
+      ...(leadData.phone !== undefined && { phone: leadData.phone || null }),
+      ...(leadData.company !== undefined && { company: leadData.company || null }),
+      ...(leadData.location !== undefined && { location: leadData.location || null }),
+      ...(leadData.notes !== undefined && { notes: leadData.notes || null }),
+      ...(leadData.status !== undefined && { status: leadData.status }),
+      ...(leadData.source !== undefined && { source: leadData.source })
+    };
+    
+    // Remove undefined values
+    Object.keys(cleanedData).forEach(key => {
+      if (cleanedData[key] === undefined) {
+        delete cleanedData[key];
+      }
+    });
+    
+    console.log('🧹 Cleaned Lead Data:', JSON.stringify(cleanedData, null, 2));
+    
     let query = supabase
       .from('leads')
-      .update(leadData)
+      .update(cleanedData)
       .eq('id', leadId);
     
     // Apply access control based on user role
     if (!isAdmin) {
       // For non-admin users, only allow updating leads they have access to
-      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(publicUserId);
+      console.log('🔒 Accessible User IDs:', accessibleUserIds);
       query = query.in('user_id', accessibleUserIds);
     }
     // Admins can update any lead (no additional filter)
     
     query = query.select().single();
+    
+    console.log('🚀 Executing update query...');
     const { data, error } = await query;
-
-    if (error) throw new Error(error.message);
+    
+    if (error) {
+      console.error('❌ UPDATE LEAD ERROR:', {
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        code: error.code
+      });
+      throw new Error(`Update failed: ${error.message}`);
+    }
+    
+    console.log('✅ Lead updated successfully:', data);
     return data as Lead;
   },
 
@@ -201,10 +284,29 @@ export const leadsService = {
     const { data: { user } } = await supabase.auth.getUser();
     const isAdmin = user?.user_metadata?.role === 'admin';
     
+    // Get the public.users table ID for the current auth user
+    let publicUserId = userId; // Default to passed userId
+    
+    if (user) {
+      try {
+        const { data: publicUser, error: publicUserError } = await supabase
+          .from('users')
+          .select('id')
+          .eq('auth_user_id', user.id)
+          .single();
+          
+        if (!publicUserError && publicUser) {
+          publicUserId = publicUser.id; // Use public.users ID
+        }
+      } catch (error) {
+        console.warn('Could not map auth user to public user for access control:', error);
+      }
+    }
+    
     // Get accessible user IDs for access control
     let accessibleUserIds: string[] = [];
     if (!isAdmin) {
-      accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      accessibleUserIds = await accessControlService.getAccessibleUserIds(publicUserId);
     }
     
     // First, delete related opportunities to avoid foreign key constraint issues
@@ -262,6 +364,25 @@ export const leadsService = {
     const { data: { user } } = await supabase.auth.getUser();
     const isAdmin = user?.user_metadata?.role === 'admin';
     
+    // Get the public.users table ID for the current auth user
+    let publicUserId = userId; // Default to passed userId
+    
+    if (user) {
+      try {
+        const { data: publicUser, error: publicUserError } = await supabase
+          .from('users')
+          .select('id')
+          .eq('auth_user_id', user.id)
+          .single();
+          
+        if (!publicUserError && publicUser) {
+          publicUserId = publicUser.id; // Use public.users ID
+        }
+      } catch (error) {
+        console.warn('Could not map auth user to public user for access control:', error);
+      }
+    }
+    
     let query = supabase
       .from('communications')
       .select('*')
@@ -270,7 +391,7 @@ export const leadsService = {
     // Apply access control based on user role
     if (!isAdmin) {
       // For non-admin users, only show communications they have access to
-      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(publicUserId);
       query = query.in('user_id', accessibleUserIds);
     }
     // Admins can see all communications (no additional filter)

@@ -51,7 +51,6 @@ export interface Opportunity {
   expected_close_date: string;
   assigned_to: string;
   created_at: string;
-  last_activity: string;
   description?: string;
   lost_reason?: string;
   next_action?: string;

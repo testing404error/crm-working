@@ -67,10 +67,24 @@ export const accessControlService = {
       const userEmail = user.email;
       const isAdmin = user.user_metadata?.role === 'admin';
       
-      console.log(`🔍 Access Control - User: ${userEmail}, ID: ${userId}, isAdmin: ${isAdmin}`);
+      console.log(`🔍 Access Control - User: ${userEmail}, ID: ${user.id}, isAdmin: ${isAdmin}`);
       
-      // Always include own ID
-      const accessibleUserIds = [userId];
+      // Get the public.users table ID for the current auth user
+      const { data: currentPublicUser, error: publicUserError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('auth_user_id', user.id)
+        .single();
+        
+      let accessibleUserIds;
+      if (publicUserError || !currentPublicUser) {
+        console.warn('Could not find public user record, using auth ID as fallback');
+        // Fallback to using auth user ID
+        accessibleUserIds = [userId];
+      } else {
+        // Use the public.users table ID
+        accessibleUserIds = [currentPublicUser.id];
+      }
       
       // If user is admin, they can access all data
       if (isAdmin) {
@@ -126,6 +140,10 @@ export const accessControlService = {
     } catch (error) {
       console.error('Error getting accessible user IDs:', error);
       // In case of error, return at least the user's own ID
+      // Also check if this is a permission error that needs attention
+      if (error instanceof Error && error.message.includes('permission denied')) {
+        console.warn('⚠️ Permission denied when checking access control. User may need admin setup.');
+      }
       return [userId];
     }
   },

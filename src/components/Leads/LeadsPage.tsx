@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../lib/supabaseClient';
 import { leadsService } from '../../services/leadsService';
 import { LeadsList } from './LeadsList';
 import { LeadForm } from './LeadForm';
@@ -147,7 +148,23 @@ export const LeadsPage: React.FC = () => {
     }
     try {
       setLoading(true);
-      const { data, total } = await leadsService.getLeads(user.id, currentPage, limit);
+      
+      // Get the public.users table ID for the current auth user
+      const { data: publicUser, error: publicUserError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('auth_user_id', user.id)
+        .single();
+        
+      let userId;
+      if (publicUserError || !publicUser) {
+        console.warn('Could not find public user record, using auth ID as fallback');
+        userId = user.id; // Fallback to auth ID
+      } else {
+        userId = publicUser.id; // Use public.users ID
+      }
+      
+      const { data, total } = await leadsService.getLeads(userId, currentPage, limit);
       setLeads(data);
       setTotalLeads(total);
       if (data.length > 0 && !detailedLead) {
@@ -203,13 +220,22 @@ export const LeadsPage: React.FC = () => {
   const handleCreateLead = async (leadData: Partial<Lead>) => {
     if (!user) return;
     try {
-      await leadsService.createLead({ ...leadData, assigned_to: leadData.assigned_to }, user.id);
+      console.log('Creating lead with data:', leadData);
+      const newLead = await leadsService.createLead({ ...leadData, assigned_to: leadData.assigned_to }, user.id);
+      console.log('Lead created successfully:', newLead);
+      
       setShowForm(false);
       setCurrentPage(1);
-      // Auto-refresh the leads list after creation
+      setError(null); // Clear any previous errors
+      
+      // Force refresh the leads list after creation
       await fetchLeadsData();
+      
+      // Show success message
+      console.log('Lead and opportunity created successfully!');
     } catch (err: any) {
-      setError(err.message);
+      console.error('Error creating lead:', err);
+      setError(`Failed to create lead: ${err.message}`);
     }
   };
 

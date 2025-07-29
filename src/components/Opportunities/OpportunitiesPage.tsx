@@ -111,21 +111,32 @@ const normalizeTags = (tags: any): string[] => {
 
   useEffect(() => {
     if (!user) return;
-    let unsubscribe: (() => void) | null = null;
+    let subscription: any = null;
     
     const setupSubscription = async () => {
-      const subscription = await opportunityService.subscribeToOpportunities(user.id, (payload) => {
-        console.log('Opportunity subscription payload:', payload);
-        fetchData(); // Refetch on any change for simplicity
-      });
-      unsubscribe = subscription.unsubscribe;
+      try {
+        subscription = await opportunityService.subscribeToOpportunities(user.id, (payload) => {
+          console.log('Opportunity subscription payload:', payload);
+          fetchData(); // Refetch on any change for simplicity
+        });
+      } catch (error) {
+        console.error('Error setting up opportunity subscription:', error);
+      }
     };
     
     setupSubscription();
     
     return () => {
-      if (unsubscribe) {
-        unsubscribe();
+      if (subscription) {
+        try {
+          if (typeof subscription.unsubscribe === 'function') {
+            subscription.unsubscribe();
+          } else if (typeof subscription === 'function') {
+            subscription(); // In case subscription itself is the unsubscribe function
+          }
+        } catch (error) {
+          console.error('Error unsubscribing from opportunities:', error);
+        }
       }
     };
   }, [user, fetchData]);

@@ -74,8 +74,60 @@ export const opportunityService = {
   },
   
   async createOpportunity(oppData: Partial<Opportunity>, userId: string): Promise<Opportunity> {
-    const { data, error } = await supabase.from('opportunities').insert([{ ...oppData, user_id: userId }]).select().single();
-    if (error) throw new Error(error.message);
+    // Get the correct user ID from the users table
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    
+    if (authError || !user) {
+      throw new Error('Authentication failed. Please sign in again.');
+    }
+    
+    let publicUserId = userId;
+    
+    // If userId is auth user ID, convert to public user ID
+    if (userId === user.id) {
+      try {
+        const { data: userData, error: userError } = await supabase
+          .from('users')
+          .select('id')
+          .eq('auth_user_id', user.id)
+          .single();
+        
+        if (userError) {
+          console.error('User lookup error in createOpportunity:', userError);
+          throw new Error('Failed to lookup user profile');
+        }
+        
+        if (userData) {
+          publicUserId = userData.id;
+        }
+      } catch (error) {
+        console.error('Error in createOpportunity user lookup:', error);
+        throw error;
+      }
+    }
+    
+    const opportunityToInsert = {
+      ...oppData,
+      user_id: publicUserId,
+      created_at: oppData.created_at || new Date().toISOString()
+    };
+    
+    // Remove last_activity if it exists since it's not in the schema
+    delete opportunityToInsert.last_activity;
+    
+    console.log('Creating opportunity with data:', opportunityToInsert);
+    
+    const { data, error } = await supabase
+      .from('opportunities')
+      .insert([opportunityToInsert])
+      .select()
+      .single();
+    
+    if (error) {
+      console.error('Opportunity creation error:', error);
+      throw new Error(error.message);
+    }
+    
     return data as Opportunity;
   },
 
@@ -117,40 +169,67 @@ export const opportunityService = {
   },
 
   async subscribeToOpportunities(userId: string, callback: (payload: any) => void) {
-    // Get user data to check if they are admin
-    const { data: { user } } = await supabase.auth.getUser();
-    const isAdmin = user?.user_metadata?.role === 'admin';
+    try {
+      // Get user data to check if they are admin
+      const { data: { user } } = await supabase.auth.getUser();
+      const isAdmin = user?.user_metadata?.role === 'admin';
 
-    if (isAdmin) {
-      // Admin sees all opportunities - no filter needed
-      return supabase.channel(`opportunities-changes-admin-${userId}`)
-        .on('postgres_changes', { 
-          event: '*', 
-          schema: 'public', 
-          table: 'opportunities'
-        }, callback)
-        .subscribe();
-    } else {
-      // For regular users, get accessible user IDs and subscribe to those
-      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
-      
-      // Create multiple subscriptions for each accessible user
-      const channels = accessibleUserIds.map(accessibleUserId => 
-        supabase.channel(`opportunities-changes-${userId}-${accessibleUserId}`)
+      if (isAdmin) {
+        // Admin sees all opportunities - no filter needed
+        const channel = supabase.channel(`opportunities-changes-admin-${userId}`)
           .on('postgres_changes', { 
             event: '*', 
             schema: 'public', 
-            table: 'opportunities',
-            filter: `user_id=eq.${accessibleUserId}`
+            table: 'opportunities'
           }, callback)
-          .subscribe()
-      );
-      
-      // Return a combined unsubscribe function
+          .subscribe();
+        
+        // Return consistent structure
+        return {
+          unsubscribe: () => {
+            try {
+              channel.unsubscribe();
+            } catch (error) {
+              console.error('Error unsubscribing from admin opportunities channel:', error);
+            }
+          }
+        };
+      } else {
+        // For regular users, get accessible user IDs and subscribe to those
+        const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+        
+        // Create multiple subscriptions for each accessible user
+        const channels = accessibleUserIds.map(accessibleUserId => 
+          supabase.channel(`opportunities-changes-${userId}-${accessibleUserId}`)
+            .on('postgres_changes', { 
+              event: '*', 
+              schema: 'public', 
+              table: 'opportunities',
+              filter: `user_id=eq.${accessibleUserId}`
+            }, callback)
+            .subscribe()
+        );
+        
+        // Return a combined unsubscribe function
+        return {
+          unsubscribe: () => {
+            try {
+              channels.forEach(channel => {
+                if (channel && typeof channel.unsubscribe === 'function') {
+                  channel.unsubscribe();
+                }
+              });
+            } catch (error) {
+              console.error('Error unsubscribing from user opportunities channels:', error);
+            }
+          }
+        };
+      }
+    } catch (error) {
+      console.error('Error setting up opportunities subscription:', error);
+      // Return a no-op unsubscribe function
       return {
-        unsubscribe: () => {
-          channels.forEach(channel => channel.unsubscribe());
-        }
+        unsubscribe: () => {}
       };
     }
   }
