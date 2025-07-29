@@ -65,6 +65,12 @@ export const LeadsList: React.FC<LeadsListProps> = ({
   onViewHistory,
   onRowClick
 }) => {
+  // Debug logging
+  console.log('📋 LeadsList component received leads:', {
+    leadsCount: leads.length,
+    leads: leads,
+    selectedLeads: selectedLeads
+  });
   const getStatusColor = (status: Lead['status']) => {
     switch (status) {
       case 'new':

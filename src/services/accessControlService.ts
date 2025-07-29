@@ -16,45 +16,23 @@ export const accessControlService = {
     try {
       console.log('🔍 Getting admin user IDs...');
       
-      const adminIds: string[] = [];
+      // Get admin user IDs from the users table (return the 'id' field, not 'auth_user_id')
+      const { data: publicUsers, error: publicError } = await supabase
+        .from('users')
+        .select('id')
+        .eq('role', 'admin');
       
-      // Get all users from auth and check for admin role
-      try {
-        const { data: authUsers } = await supabase.auth.admin.listUsers();
-        
-        if (authUsers?.users) {
-          const adminUsers = authUsers.users.filter(user => 
-            user.user_metadata?.role === 'admin'
-          );
-          
-          const foundAdminIds = adminUsers.map(user => user.id);
-          adminIds.push(...foundAdminIds);
-          
-          console.log(`✅ Found ${foundAdminIds.length} admin users`);
-        }
-      } catch (adminError) {
-        console.warn('Failed to fetch admin users from auth API:', adminError.message);
-        // Fallback: Try to get admin IDs from the users table with role check
-        try {
-          const { data: publicUsers } = await supabase
-            .from('users')
-            .select('auth_user_id')
-            .eq('role', 'admin');
-          
-          if (publicUsers) {
-            const publicAdminIds = publicUsers.map(u => u.auth_user_id).filter(Boolean);
-            adminIds.push(...publicAdminIds);
-            console.log(`✅ Found ${publicAdminIds.length} admin users from public table`);
-          }
-        } catch (publicError) {
-          console.warn('Failed to fetch admin users from public table:', publicError.message);
-        }
+      if (publicError) {
+        console.warn('Failed to fetch admin users from public table:', publicError.message);
+        return [];
       }
       
-      const uniqueAdminIds = [...new Set(adminIds)];
-      console.log('🎯 Final admin user IDs:', uniqueAdminIds);
+      const adminIds = publicUsers?.map(u => u.id).filter(Boolean) || [];
       
-      return uniqueAdminIds;
+      console.log(`✅ Found ${adminIds.length} admin users from public table`);
+      console.log('🎯 Final admin user IDs (database IDs):', adminIds);
+      
+      return adminIds;
     } catch (error) {
       console.error('Error getting admin user IDs:', error);
       return [];
@@ -82,10 +60,12 @@ export const accessControlService = {
         return userId ? [userId] : [];
       }
       
-      const userEmail = user.email;
+const userEmail = user.email;
       const isAdmin = user.user_metadata?.role === 'admin';
       
-      console.log(`🔍 New Access Control - User: ${userEmail}, ID: ${user.id}, isAdmin: ${isAdmin}`);
+      // Diagnostic: Log user role and metadata
+      console.log(`🔍 New Access Control - User: ${userEmail}, ID: ${user.id}, Role: ${user.user_metadata?.role}`);
+      console.log(`🔍 User Metadata:`, user.user_metadata);
       
       // Get the public.users table ID for the current auth user
       const { data: currentPublicUser, error: publicUserError } = await supabase
@@ -123,26 +103,33 @@ export const accessControlService = {
       // ✅ 2. ASSIGNED USERS – Auto Data Sharing
       // Check if this user is in the assignees list for any admin
       try {
-        // FIXED: Use direct JOIN instead of foreign key reference
+        // FIXED: Use separate queries to avoid JOIN ambiguity
         const { data: accessGrants, error: accessError } = await supabase
           .from('access_control')
-          .select(`
-            user_id,
-            users!inner(auth_user_id, role)
-          `)
+          .select('user_id')
           .eq('granted_to_user_id', currentDbUserId);
         
-        if (!accessError && accessGrants) {
+        if (!accessError && accessGrants && accessGrants.length > 0) {
           console.log(`🔍 Found ${accessGrants.length} access grants for user ${currentDbUserId}`);
+          
+          // Get user details for each grant in a separate query
           for (const grant of accessGrants) {
-            // Check if the grantor is an admin by checking the public users table role
-            const grantorUser = grant.users;
-            console.log(`🔍 Checking grant: user_id=${grant.user_id}, grantor_role=${grantorUser?.role}`);
-            if (grantorUser?.role === 'admin') {
-              accessibleUserIds.push(grant.user_id);
-              console.log(`✅ Assignee access granted to admin user: ${grant.user_id}`);
-            } else {
-              console.log(`❌ Grant is not from admin (role: ${grantorUser?.role})`);
+            const { data: grantorUser, error: userError } = await supabase
+              .from('users')
+              .select('id, role')
+              .eq('id', grant.user_id)
+              .single();
+              
+            if (!userError && grantorUser) {
+              console.log(`🔍 Checking grant: user_id=${grant.user_id}, grantor_role=${grantorUser.role}`);
+              if (grantorUser.role === 'admin') {
+                accessibleUserIds.push(grant.user_id);
+                console.log(`✅ Assignee access granted to admin user: ${grant.user_id}`);
+              } else {
+                console.log(`❌ Grant is not from admin (role: ${grantorUser.role})`);
+              }
+            } else if (userError) {
+              console.warn(`Could not fetch grantor user details for ${grant.user_id}:`, userError.message);
             }
           }
         } else if (accessError) {
@@ -156,15 +143,22 @@ export const accessControlService = {
       
       // ✅ 3. "Can View Other Users' Data" Permission Check
       try {
-        const { data: hasPermission, error: permissionError } = await supabase.rpc(
-          'user_can_view_other_users_data',
-          { check_user_id: user.id }
-        );
+        // Check user_permissions table directly instead of using RPC function
+        const { data: userPermission, error: permissionError } = await supabase
+          .from('user_permissions')
+          .select('can_view_other_users_data, granted_by')
+          .eq('user_id', user.id)
+          .single();
         
-        if (!permissionError && hasPermission) {
-          console.log('🔓 User has "Can View Other Users Data" permission - granting access to ALL data');
+        const hasPermission = !permissionError && userPermission?.can_view_other_users_data === true;
+        
+        console.log(`🔍 Checking user permission:`, { hasPermission, userPermission, permissionError: permissionError?.message });
+        
+        if (hasPermission) {
+          console.log(`🔓 User has "Can View Other Users Data" permission - granting access to ALL data`);
           
-          // Get all user IDs from the users table
+          // When a user has "Can View Other Users' Data" permission,
+          // they should have access to ALL users, not just admins.
           const { data: allUsers, error: usersError } = await supabase
             .from('users')
             .select('id');
@@ -172,8 +166,11 @@ export const accessControlService = {
           if (!usersError && allUsers) {
             const allUserIds = allUsers.map(u => u.id);
             accessibleUserIds.push(...allUserIds);
-            console.log(`✅ Permission granted access to ${allUserIds.length} users`);
+            console.log(`✅ Full access granted to ${allUserIds.length} users`);
           }
+        } else if (permissionError) {
+          // Only log as warning if it's not a "table doesn't exist" error
+          console.warn('Could not check user view permission:', permissionError.message);
         }
       } catch (permissionError) {
         console.warn('Could not check user view permission:', permissionError);
@@ -209,22 +206,30 @@ export const accessControlService = {
         }];
       }
 
-      // Get user details for all accessible users from auth.users
+      // Get user details from the public users table
       try {
-        const { data: authData } = await supabase.auth.admin.listUsers();
-        const allAuthUsers = authData?.users || [];
+        const { data: publicUsers, error: usersError } = await supabase
+          .from('users')
+          .select('id, auth_user_id, email, name')
+          .in('id', accessibleUserIds);
         
-        const accessibleUsers = allAuthUsers.filter(user => 
-          accessibleUserIds.includes(user.id)
-        );
-
-        return accessibleUsers.map(user => ({
+        if (usersError) {
+          console.warn('Failed to fetch user details from public table:', usersError.message);
+          // Fallback: return basic info for accessible user IDs
+          return accessibleUserIds.map(id => ({
+            id,
+            email: `user-${id.slice(0, 8)}@example.com`,
+            name: `User ${id.slice(0, 8)}`
+          }));
+        }
+        
+        return publicUsers?.map(user => ({
           id: user.id,
           email: user.email || '',
-          name: user.user_metadata?.name || user.email || 'Unknown User'
-        }));
-      } catch (adminError) {
-        console.warn('Failed to fetch user details from admin API:', adminError.message);
+          name: user.name || user.email || 'Unknown User'
+        })) || [];
+      } catch (fetchError) {
+        console.warn('Failed to fetch user details:', fetchError.message);
         // Fallback: return basic info for accessible user IDs
         return accessibleUserIds.map(id => ({
           id,

@@ -51,7 +51,17 @@ export const AccessDashboard: React.FC = () => {
     fetchPendingRequests();
   }, []);
 
-  // Remove admin-only restriction - all users can send access requests
+  // Only admin users can access this dashboard
+  if (!isAdmin) {
+    return (
+      <div className="p-6 text-center">
+        <div className="text-red-600">
+          <h2 className="text-xl font-semibold mb-2">Access Denied</h2>
+          <p>Only administrators can access the Access Management dashboard.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">

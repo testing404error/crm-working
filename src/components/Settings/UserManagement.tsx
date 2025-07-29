@@ -23,6 +23,13 @@ export const UserManagement: React.FC = () => {
   
   // Check if current user is admin
   const isAdmin = user?.role === 'admin';
+  
+  console.log('Current user in UserManagement:', {
+    userId: user?.id,
+    email: user?.email,
+    role: user?.role,
+    isAdmin: isAdmin
+  });
 
   // Setup database table if needed
   const setupDatabase = async () => {
@@ -111,14 +118,39 @@ export const UserManagement: React.FC = () => {
 
   // Handles toggling the "Can View Other Users' Data" permission
   const handleTogglePermission = async (userId: string, currentPermission: boolean, userEmail: string) => {
+    console.log('handleTogglePermission called with:', {
+      userId,
+      currentPermission,
+      userEmail,
+      newPermission: !currentPermission
+    });
+    
     const newPermission = !currentPermission;
     const { data, error } = await apiService.updateUserPermission(userId, newPermission);
     
+    console.log('API response:', { data, error });
+    
     if (error) {
+      console.error('Permission update failed:', error);
       toast.error(`Failed to update permission: ${error}`);
     } else {
-      toast.success(`${userEmail} ${newPermission ? 'can now' : 'can no longer'} view other users' data`);
-      fetchManagedUsers(); // Refresh the list to show updated permissions
+      console.log('Permission update successful:', data);
+      const roleMessage = data?.newRole ? ` Role updated to: ${data.newRole}.` : '';
+      toast.success(`${userEmail} ${newPermission ? 'can now' : 'can no longer'} view other users' data.${roleMessage}`);
+      
+      // Update local state immediately for better UX
+      if (data?.newRole) {
+        setManagedUsers(prevUsers => 
+          prevUsers.map(user => 
+            user.user_id === userId 
+              ? { ...user, can_view_other_users_data: newPermission, role: data.newRole }
+              : user
+          )
+        );
+      }
+      
+      // Also refresh the list to ensure consistency
+      fetchManagedUsers();
     }
   };
 
@@ -148,12 +180,102 @@ export const UserManagement: React.FC = () => {
   // Handles revoking access for a specific user.
   const handleRevoke = async (requestId: string, userEmail: string) => {
     if (window.confirm(`Are you sure you want to revoke access to ${userEmail}?`)) {
-      const { error } = await apiService.revokeAccess(requestId);
-      if (error) {
-        toast.error(`Failed to revoke access: ${error}`);
-      } else {
+      try {
+        setIsLoading(true);
+        
+        // If we have a valid access_request_id, use the API revoke function
+        if (requestId && requestId !== 'undefined' && !requestId.startsWith('user-')) {
+          const { error } = await apiService.revokeAccess(requestId);
+          if (error) {
+            toast.error(`Failed to revoke access: ${error}`);
+            return;
+          }
+        } else {
+          // Fallback: Direct database cleanup when we don't have a proper request ID
+          console.log(`No valid request ID found for ${userEmail}, performing direct cleanup`);
+          
+          // Get the user's database IDs
+          const userToRevoke = managedUsers.find(u => u.email === userEmail);
+          if (!userToRevoke) {
+            toast.error('User not found for revocation');
+            return;
+          }
+          
+          // Get current user's database ID
+          const { data: currentUserData, error: currentUserError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('auth_user_id', user.id)
+            .single();
+            
+          if (currentUserError || !currentUserData) {
+            toast.error('Failed to get current user information');
+            return;
+          }
+          
+          // Get target user's database ID
+          const { data: targetUserData, error: targetUserError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('auth_user_id', userToRevoke.user_id)
+            .single();
+            
+          if (targetUserError || !targetUserData) {
+            toast.error('Failed to get target user information');
+            return;
+          }
+          
+          // Delete from access_control table
+          const { error: accessControlError } = await supabase
+            .from('access_control')
+            .delete()
+            .eq('user_id', currentUserData.id)
+            .eq('granted_to_user_id', targetUserData.id);
+            
+          if (accessControlError) {
+            console.warn('Failed to delete from access_control:', accessControlError.message);
+          }
+          
+          // Clean up pending access requests
+          const { error: requestError } = await supabase
+            .from('pending_access_requests')
+            .delete()
+            .eq('requester_id', user.id)
+            .eq('receiver_id', userToRevoke.user_id);
+            
+          if (requestError) {
+            console.warn('Failed to delete from pending_access_requests:', requestError.message);
+          }
+          
+          // Clean up user permissions
+          const { error: permissionsError } = await supabase
+            .from('user_permissions')
+            .delete()
+            .eq('user_id', userToRevoke.user_id)
+            .eq('granted_by', user.id);
+            
+          if (permissionsError) {
+            console.warn('Failed to delete from user_permissions:', permissionsError.message);
+          }
+        }
+        
         toast.success(`Access to ${userEmail} has been revoked.`);
-        fetchManagedUsers(); // Refresh the list after revoking.
+        
+        // Remove the user from the local state immediately for better UX
+        setManagedUsers(prevUsers => 
+          prevUsers.filter(user => 
+            user.access_request_id !== requestId && user.user_id !== requestId && user.email !== userEmail
+          )
+        );
+        
+        // Also refresh the list to ensure consistency
+        await fetchManagedUsers();
+        
+      } catch (error) {
+        console.error('Error during revoke operation:', error);
+        toast.error('An unexpected error occurred while revoking access');
+      } finally {
+        setIsLoading(false);
       }
     }
   };
@@ -295,24 +417,6 @@ export const UserManagement: React.FC = () => {
       <div className="mb-6">
         <h2 className="text-xl font-semibold text-gray-900">User Access Management</h2>
         <p className="text-sm text-gray-600 mt-1">Manage user permissions and access control. Send access requests to users and control their data visibility.</p>
-        
-        {/* Admin Information Panel */}
-        {isAdmin && (
-          <div className="mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <div className="flex items-start space-x-3">
-              <Settings className="w-5 h-5 text-blue-600 mt-0.5" />
-              <div>
-                <h4 className="font-semibold text-blue-900 mb-2">Admin Role Behavior</h4>
-                <ul className="text-sm text-blue-800 space-y-1">
-                  <li>✅ You automatically have access to all leads and opportunities created by any user</li>
-                  <li>✅ Any leads/opportunities you create are automatically shared with users in your "Active Access" list</li>
-                  <li>✅ You can manage user permissions using the "Can View Other Users' Data" toggle</li>
-                  <li>❌ The old "Login As" feature has been removed for security</li>
-                </ul>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -339,6 +443,7 @@ export const UserManagement: React.FC = () => {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User Email</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User Role</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Can View Other Users' Data</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Granted Date</th>
@@ -347,7 +452,7 @@ export const UserManagement: React.FC = () => {
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {isLoading ? (
-                  <tr><td colSpan={5} className="text-center p-6 text-gray-500">Loading...</td></tr>
+                  <tr><td colSpan={6} className="text-center p-6 text-gray-500">Loading...</td></tr>
                 ) : filteredUsers.length > 0 ? (
                   filteredUsers.map((user, index) => {
                     // Create a unique key by combining multiple identifiers
@@ -355,6 +460,14 @@ export const UserManagement: React.FC = () => {
                     return (
                     <tr key={uniqueKey}>
                       <td className="px-6 py-4 font-medium text-gray-900">{user.email}</td>
+                      <td className="px-6 py-4">
+                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${
+                          user.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
+                        }`}>
+                          <User className="w-4 h-4 mr-1.5" />
+                          {user.role || 'user'}
+                        </span>
+                      </td>
                       <td className="px-6 py-4">
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                           <ShieldCheck className="w-4 h-4 mr-1.5" />
@@ -395,17 +508,24 @@ export const UserManagement: React.FC = () => {
                       <td className="px-6 py-4 text-sm text-gray-500">
                         {user.access_granted_at ? new Date(user.access_granted_at).toLocaleDateString() : 'N/A'}
                       </td>
-                      <td className="px-6 py-4 text-right space-x-2">
-                        <Button variant="destructive" size="sm" onClick={() => handleRevoke(user.access_request_id || user.user_id, user.email)}>
-                          <XCircle className="w-4 h-4 mr-2" />
-                          Revoke
-                        </Button>
-                      </td>
+{isAdmin && (
+                        <td className="px-6 py-4 text-right space-x-2">
+                          <Button 
+                            variant="destructive" 
+                            size="sm" 
+                            onClick={() => handleRevoke(user.access_request_id || user.user_id, user.email)}
+                            disabled={isLoading}
+                          >
+                            <XCircle className="w-4 h-4 mr-2" />
+                            {isLoading ? 'Revoking...' : 'Revoke'}
+                          </Button>
+                        </td>
+                      )}
                     </tr>
                     );
                   })
                 ) : (
-                  <tr><td colSpan={5} className="text-center p-6 text-gray-500">No users have granted you access yet.</td></tr>
+                  <tr><td colSpan={6} className="text-center p-6 text-gray-500">No users have granted you access yet.</td></tr>
                 )}
               </tbody>
             </table>

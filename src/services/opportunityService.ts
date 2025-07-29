@@ -68,7 +68,8 @@ export const opportunityService = {
     if (!isAdmin) {
       // Get accessible user IDs (own + users who granted access and assigned this user)
       const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
-      query = query.in('user_id', accessibleUserIds);
+query = query.in('user_id', accessibleUserIds);
+      console.log(`Accessible User IDs for opportunities:`, accessibleUserIds);
     }
     
     // Add your filter logic here based on the filters object

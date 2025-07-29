@@ -58,6 +58,38 @@ export const leadsService = {
   // ✅ ADMIN ACCESS: Admins see ALL leads from all users
   // ✅ REGULAR USERS: See their own leads + leads from users who granted access + assignee leads
   async getLeads(userId: string, page: number, limit: number = 10): Promise<{ data: Lead[]; total: number }> {
+    console.log('🚀 getLeads called with:', { userId, page, limit });
+    
+    // DIAGNOSTIC: Check total leads in database without any filters
+    const { data: allLeadsCheck, error: allLeadsCheckError } = await supabase
+      .from('leads')
+      .select('id, name, user_id')
+      .order('created_at', { ascending: false });
+    
+    if (!allLeadsCheckError && allLeadsCheck) {
+      console.log(`🔍 TOTAL LEADS IN DATABASE: ${allLeadsCheck.length}`);
+      console.log('📋 All leads:', allLeadsCheck.map(l => ({ name: l.name, user_id: l.user_id })));
+      
+      // Get accessible user IDs to compare
+      const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      console.log('🔍 Accessible user IDs:', accessibleUserIds);
+      
+      // Show which leads should be accessible
+      const accessibleLeads = allLeadsCheck.filter(lead => accessibleUserIds.includes(lead.user_id));
+      console.log(`🔍 SHOULD BE ACCESSIBLE: ${accessibleLeads.length} leads`);
+      accessibleLeads.forEach(lead => {
+        console.log(`  ✅ "${lead.name}" (user: ${lead.user_id})`);
+      });
+      
+      const inaccessibleLeads = allLeadsCheck.filter(lead => !accessibleUserIds.includes(lead.user_id));
+      console.log(`🔍 NOT ACCESSIBLE: ${inaccessibleLeads.length} leads`);
+      inaccessibleLeads.forEach(lead => {
+        console.log(`  ❌ "${lead.name}" (user: ${lead.user_id})`);
+      });
+    } else {
+      console.log('❌ Error checking total leads:', allLeadsCheckError?.message);
+    }
+    
     const start = (page - 1) * limit;
     const end = start + limit - 1;
 
@@ -80,7 +112,25 @@ export const leadsService = {
     if (!isAdmin) {
       // For non-admin users, get all user IDs they can access data for
       const accessibleUserIds = await accessControlService.getAccessibleUserIds(userId);
+      console.log(`🔍 Accessible User IDs for leads:`, accessibleUserIds);
+      
+      // DIAGNOSTIC: Let's see what user_ids actually exist in the leads table
+      const { data: leadsUserIds, error: userIdsError } = await supabase
+        .from('leads')
+        .select('user_id')
+        .limit(10);
+      
+      if (!userIdsError && leadsUserIds) {
+        const uniqueUserIds = [...new Set(leadsUserIds.map(l => l.user_id))];
+        console.log(`🔍 DIAGNOSTIC: User IDs found in leads table:`, uniqueUserIds);
+        console.log(`🔍 DIAGNOSTIC: Matching user IDs:`, uniqueUserIds.filter(id => accessibleUserIds.includes(id)));
+      } else {
+        console.log(`🔍 DIAGNOSTIC: Error fetching leads user_ids:`, userIdsError?.message);
+      }
+      
       query = query.in('user_id', accessibleUserIds);
+    } else {
+      console.log(`🔑 ADMIN USER: Will see ALL leads without user_id filter`);
     }
     // Admins get to see ALL leads regardless of who created them (no filter)
     
@@ -89,6 +139,36 @@ export const leadsService = {
       .range(start, end);
 
     const { data, error, count } = await query;
+
+    // Add debugging information
+    console.log(`📊 Leads query result:`, {
+      isAdmin,
+      totalLeads: count,
+      leadsReturned: data?.length || 0,
+      error: error?.message || 'No error'
+    });
+    
+    if (data && data.length > 0) {
+      console.log(`📋 Sample lead user_ids:`, data.slice(0, 3).map(lead => lead.user_id));
+    } else {
+      console.log(`❌ No leads found in database`);
+      
+      // Let's also check if there are ANY leads in the database at all
+      const { data: allLeads, error: allLeadsError } = await supabase
+        .from('leads')
+        .select('id, user_id, name')
+        .limit(10);
+        
+      if (!allLeadsError && allLeads) {
+        console.log(`🔍 Database contains ${allLeads.length} total leads:`);
+        allLeads.forEach(lead => {
+          const hasAccess = accessibleUserIds.includes(lead.user_id);
+          console.log(`  - Lead "${lead.name}" (user: ${lead.user_id}) - Access: ${hasAccess ? '✅' : '❌'}`);
+        });
+      } else {
+        console.log(`🔍 Could not check total leads in database:`, allLeadsError?.message);
+      }
+    }
 
     if (error) throw new Error(error.message);
     return { data: data as Lead[], total: count || 0 };

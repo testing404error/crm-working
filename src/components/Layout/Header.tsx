@@ -82,11 +82,13 @@ export const Header: React.FC<HeaderProps> = ({ onMenuToggle, onInviteUserClick 
           {/* Admin Status Indicator */}
           <AdminStatusIndicator />
           
-          {/* Request Access button available to all users */}
-          <Button onClick={onInviteUserClick}>
-            <Plus className="w-4 h-4 mr-2" />
-            Request Access
-          </Button>
+          {/* Request Access button - only available to admin users */}
+          {user?.role === 'admin' && (
+            <Button onClick={onInviteUserClick}>
+              <Plus className="w-4 h-4 mr-2" />
+              Request Access
+            </Button>
+          )}
 
           {/* --- NOTIFICATION BELL DROPDOWN --- */}
           <DropdownMenu>

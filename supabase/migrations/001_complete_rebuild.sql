@@ -163,17 +163,29 @@ CREATE INDEX idx_opportunities_stage ON public.opportunities(stage);
 -- CREATE FUNCTIONS
 -- =====================================================
 
--- Helper function for access control
+-- Helper function for access control with user permissions support
 CREATE OR REPLACE FUNCTION get_accessible_user_ids(input_user_id UUID)
 RETURNS UUID[] AS $$
 DECLARE
     user_role TEXT;
+    public_user_id UUID;
     accessible_ids UUID[];
+    has_view_permission BOOLEAN := FALSE;
 BEGIN
     -- Get user role from auth.users metadata
     SELECT COALESCE(raw_user_meta_data->>'role', 'user') INTO user_role
     FROM auth.users 
     WHERE id = input_user_id;
+    
+    -- Get the public user ID from auth user ID
+    SELECT id INTO public_user_id 
+    FROM public.users 
+    WHERE auth_user_id = input_user_id;
+    
+    -- If no public user found, return empty array
+    IF public_user_id IS NULL THEN
+        RETURN ARRAY[]::UUID[];
+    END IF;
     
     -- Admin users can access all user data
     IF user_role = 'admin' THEN
@@ -181,28 +193,39 @@ BEGIN
         RETURN COALESCE(accessible_ids, ARRAY[]::UUID[]);
     END IF;
     
+    -- Check if user has "Can View Other Users' Data" permission
+    SELECT COALESCE(up.can_view_other_users_data, FALSE) INTO has_view_permission
+    FROM public.user_permissions up
+    WHERE up.user_id = input_user_id;
+    
+    -- If user has permission to view all data, grant access to all users
+    IF has_view_permission THEN
+        SELECT ARRAY_AGG(id) INTO accessible_ids FROM public.users;
+        RETURN COALESCE(accessible_ids, ARRAY[]::UUID[]);
+    END IF;
+    
     -- Regular users can access their own data + data from users who granted access
     SELECT ARRAY_AGG(DISTINCT user_id) INTO accessible_ids
     FROM (
-        -- Own data
-        SELECT input_user_id as user_id
+        -- Own data (using public user ID)
+        SELECT public_user_id as user_id
         UNION
         -- Data from users who granted access
         SELECT ac.user_id
         FROM public.access_control ac
-        WHERE ac.granted_to_user_id = input_user_id
+        WHERE ac.granted_to_user_id = public_user_id
         UNION
         -- Data where user is assigned (for leads/opportunities)
         SELECT l.user_id
         FROM public.leads l
-        WHERE l.assigned_to = input_user_id
+        WHERE l.assigned_to = public_user_id
         UNION
         SELECT o.user_id
         FROM public.opportunities o
-        WHERE o.assigned_to = input_user_id
+        WHERE o.assigned_to = public_user_id
     ) accessible_data;
     
-    RETURN COALESCE(accessible_ids, ARRAY[input_user_id]);
+    RETURN COALESCE(accessible_ids, ARRAY[public_user_id]);
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 

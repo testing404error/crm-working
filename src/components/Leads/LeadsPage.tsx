@@ -292,10 +292,39 @@ export const LeadsPage: React.FC = () => {
           : [];
       return leadTags.includes(tag);
     });
-    return (
+    
+    const matches = (
       matchesSearch && matchesStatus && matchesSource && matchesAssignedTo &&
       matchesMinScore && matchesMaxScore && matchesCreatedAfter && matchesCreatedBefore && matchesTags
     );
+    
+    // Debug filtering
+    if (!matches) {
+      console.log(`🔍 Lead ${lead.name} filtered out:`, {
+        matchesSearch,
+        matchesStatus,
+        matchesSource,
+        matchesAssignedTo,
+        matchesMinScore,
+        matchesMaxScore,
+        matchesCreatedAfter,
+        matchesCreatedBefore,
+        matchesTags,
+        filters
+      });
+    }
+    
+    return matches;
+  });
+  
+  // Debug final results
+console.log(`📊 Frontend filtering results:`, {
+    totalLeads: leads.length,
+    filteredLeadsCount: filteredLeads.length,
+    leads: leads,
+    filteredLeads: filteredLeads,
+    loading: loading,
+    error: error
   });
 
   const handleSelectAll = () => {

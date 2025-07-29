@@ -81,26 +81,92 @@ export const AssigneeSettings: React.FC = () => {
 
   const handleGrantAccess = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUserId || !dbUserId) return;
+    if (!selectedUserId || !user) return;
 
     try {
-      await addAssigneeRelationship(dbUserId, selectedUserId);
+      console.log('Creating assignee relationship:', {
+        admin_user_id: user.id, // Auth user ID
+        assignee_user_id: selectedUserId // This should be auth user ID of the assignee
+      });
+      
+      // Get the assignee's auth user ID from their database ID
+      const { data: assigneeData, error: assigneeError } = await supabase
+        .from('users')
+        .select('auth_user_id')
+        .eq('id', selectedUserId)
+        .single();
+        
+      if (assigneeError || !assigneeData) {
+        throw new Error('Failed to find assignee user data');
+      }
+      
+      // Use the new separated assignee function to create ONLY assignee relationships
+      // This will NOT affect User Management permissions
+      const { data, error } = await supabase.functions.invoke('api', {
+        body: { 
+          action: 'CREATE_ASSIGNEE_RELATIONSHIP', 
+          payload: { 
+            admin_user_id: user.id, // Current user's auth ID
+            assignee_user_id: assigneeData.auth_user_id // Assignee's auth ID
+          }
+        }
+      });
+      
+      if (error) {
+        console.error('API Error Details:', error);
+        throw new Error(`API Error: ${error.message || JSON.stringify(error)}`);
+      }
+      
+      if (data && data.error) {
+        console.error('Function Error Details:', data);
+        throw new Error(`Function Error: ${data.error}`);
+      }
+      
+      console.log('Assignee relationship created successfully:', data);
       setSelectedUserId('');
       await fetchData();
       setError(null);
     } catch (err: any) {
+      console.error('Error creating assignee relationship:', err);
       setError(err.message);
     }
   };
 
   const handleRevokeAccess = async (grantorId: string, granteeId: string) => {
-    if (!dbUserId) return;
+    if (!user) return;
     if (window.confirm('Are you sure you want to revoke this access?')) {
       try {
-        await removeAssigneeRelationship(dbUserId, granteeId);
+        // Get the grantee's auth user ID from their database ID
+        const { data: granteeData, error: granteeError } = await supabase
+          .from('users')
+          .select('auth_user_id')
+          .eq('id', granteeId)
+          .single();
+          
+        if (granteeError || !granteeData) {
+          throw new Error('Failed to find grantee user data');
+        }
+        
+        // Use the API service to remove the assignee relationship
+        const { data, error } = await supabase.functions.invoke('api', {
+          body: { 
+            action: 'REMOVE_ASSIGNEE_RELATIONSHIP', 
+            payload: { 
+              admin_user_id: user.id, // Current user's auth ID
+              assignee_user_id: granteeData.auth_user_id // Grantee's auth ID
+            }
+          }
+        });
+        
+        if (error) {
+          throw new Error(error.message);
+        }
+        
+        console.log('Assignee relationship removed successfully:', data);
         await fetchData();
         setError(null);
       } catch (err: any) {
+        console.error('Error removing assignee relationship:', err);
         setError(err.message);
       }
     }

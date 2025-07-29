@@ -78,15 +78,17 @@ export const userPermissionsService = {
    * Update a user's "Can View Other Users' Data" permission
    * @param targetUserId - The user whose permission to update
    * @param canViewOtherUsersData - Whether they can view other users' data
-   * @param adminUserId - The admin making the change
    * @returns Success boolean
    */
   async updateUserViewPermission(
     targetUserId: string, 
-    canViewOtherUsersData: boolean = false, 
-    adminUserId: string
+    canViewOtherUsersData: boolean = false
   ): Promise<boolean> {
     try {
+      const adminUserId = (await supabase.auth.getUser()).data.user?.id;
+      if (!adminUserId) {
+        throw new Error('Failed to get admin user ID');
+      }
       // Use the stored function to update the permission
       const { data, error } = await supabase.rpc('set_user_data_view_permission', {
         target_user_id: targetUserId,

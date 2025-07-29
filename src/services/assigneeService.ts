@@ -73,9 +73,16 @@ export const getAssigneeRelationships = async (userId?: string) => {
  * This allows the grantee to see the grantor's leads and opportunities
  */
 export const addAssigneeRelationship = async (grantorId: string, granteeId: string) => {
+  // Validate that we're only creating assignee relationships manually from the UI
+  if (!grantorId || !granteeId) {
+    console.error('Invalid user IDs provided for assignee relationship');
+    throw new Error('Invalid user IDs provided');
+  }
+
   try {
     console.log(`🔗 Granting access: ${grantorId} -> ${granteeId}`);
     
+    // Assuming existence checks are already handled in UI logic
     const { data, error } = await supabase
       .from('access_control')
       .insert([{ user_id: grantorId, granted_to_user_id: granteeId }])
@@ -89,7 +96,7 @@ export const addAssigneeRelationship = async (grantorId: string, granteeId: stri
       throw new Error(`Failed to create access relationship: ${error.message}`);
     }
     
-    console.log('✅ Access granted successfully');
+    console.log('✅ Access granted successfully for manual assignee addition');
     return data;
   } catch (error) {
     console.error('Could not add assignee relationship:', error);
@@ -100,19 +107,53 @@ export const addAssigneeRelationship = async (grantorId: string, granteeId: stri
 /**
  * Revoke access between users
  * This removes the grantee's ability to see the grantor's data
+ * Also cleans up any related pending access requests
  */
 export const removeAssigneeRelationship = async (grantorId: string, granteeId: string) => {
   try {
     console.log(`🔗 Revoking access: ${grantorId} -> ${granteeId}`);
     
-    const { error } = await supabase
+    // First, get the auth IDs for both users
+    const [grantorAuth, granteeAuth] = await Promise.all([
+      supabase.from('users').select('auth_user_id').eq('id', grantorId).single(),
+      supabase.from('users').select('auth_user_id').eq('id', granteeId).single()
+    ]);
+    
+    if (grantorAuth.error || granteeAuth.error) {
+      throw new Error('Failed to get user authentication IDs');
+    }
+    
+    // Delete from access_control table
+    const { error: accessControlError } = await supabase
       .from('access_control')
       .delete()
       .eq('user_id', grantorId)
       .eq('granted_to_user_id', granteeId);
     
-    if (error) {
-      throw new Error(`Failed to remove access relationship: ${error.message}`);
+    if (accessControlError) {
+      console.warn('Failed to delete from access_control:', accessControlError.message);
+    }
+    
+    // Also clean up any pending access requests between these users
+    // Check both directions: grantor as requester or receiver
+    const { error: requestsError } = await supabase
+      .from('pending_access_requests')
+      .delete()
+      .or(`and(requester_id.eq.${grantorAuth.data.auth_user_id},receiver_id.eq.${granteeAuth.data.auth_user_id}),and(requester_id.eq.${granteeAuth.data.auth_user_id},receiver_id.eq.${grantorAuth.data.auth_user_id})`);
+    
+    if (requestsError) {
+      console.warn('Failed to delete from pending_access_requests:', requestsError.message);
+    }
+    
+    // Clean up user permissions that might have been granted
+    const { error: permissionsError } = await supabase
+      .from('user_permissions')
+      .delete()
+      .eq('user_id', granteeAuth.data.auth_user_id)
+      .eq('granted_by', grantorAuth.data.auth_user_id);
+    
+    if (permissionsError) {
+      console.warn('Failed to delete from user_permissions:', permissionsError.message);
     }
     
     console.log('✅ Access revoked successfully');

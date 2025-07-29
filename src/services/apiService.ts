@@ -143,5 +143,49 @@ getManagedUsers: async (): Promise<ApiResponse<any[]>> => {
     }
   },
 
+  // --- NEW METHOD: Creates an assignee relationship (separate from user permissions) ---
+  createAssigneeRelationship: async (
+    adminUserId: string,
+    assigneeUserId: string
+  ): Promise<ApiResponse<any>> => {
+    try {
+      const { data, error } = await supabase.functions.invoke('api', {
+        body: { 
+          action: 'CREATE_ASSIGNEE_RELATIONSHIP',
+          payload: {
+            admin_user_id: adminUserId,
+            assignee_user_id: assigneeUserId
+          }
+        },
+      });
+      if (error) throw new Error(error.message);
+      return { data, error: null };
+    } catch (err: any) {
+      return { data: null, error: err.message };
+    }
+  },
+
+  // --- NEW METHOD: Removes an assignee relationship ---
+  removeAssigneeRelationship: async (
+    adminUserId: string,
+    assigneeUserId: string
+  ): Promise<ApiResponse<any>> => {
+    try {
+      const { data, error } = await supabase.functions.invoke('api', {
+        body: { 
+          action: 'REMOVE_ASSIGNEE_RELATIONSHIP',
+          payload: {
+            admin_user_id: adminUserId,
+            assignee_user_id: assigneeUserId
+          }
+        },
+      });
+      if (error) throw new Error(error.message);
+      return { data, error: null };
+    } catch (err: any) {
+      return { data: null, error: err.message };
+    }
+  },
+
 };
 

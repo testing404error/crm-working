@@ -378,35 +378,80 @@ $$;`
 
       case 'GET_PENDING_REQUESTS': {
         try {
-          const { data, error } = await userClient.rpc('get_pending_requests_for_user');
-          if (error) throw new Error(error.message);
-          return createCorsResponse(data, 200);
-        } catch (err) {
+          console.log('GET_PENDING_REQUESTS: Starting request for user:', user.id);
+          
+          // Try using RPC function first
+          const { data: rpcData, error: rpcError } = await userClient.rpc('get_pending_requests_for_user');
+          
+          if (!rpcError && rpcData) {
+            console.log('RPC function succeeded, returning data:', rpcData.length, 'requests');
+            return createCorsResponse(rpcData, 200);
+          }
+          
+          console.log('RPC function failed or unavailable, using fallback query. Error:', rpcError?.message);
+          
           // Fallback: Direct query if function doesn't exist
           const { data, error } = await supabaseAdmin
             .from('pending_access_requests')
             .select(`
               id,
-              requester_id
+              requester_id,
+              created_at,
+              status
             `)
             .eq('receiver_id', user.id)
-            .eq('status', 'pending');
+            .eq('status', 'pending')
+            .order('created_at', { ascending: false });
           
-          if (error) throw new Error(error.message);
+          if (error) {
+            console.error('Direct query failed:', error);
+            throw new Error(`Failed to fetch pending requests: ${error.message}`);
+          }
           
-          // Get requester emails
+          console.log('Direct query succeeded, found', data?.length || 0, 'pending requests');
+          
+          // Get requester details
           const requests = [];
           for (const request of data || []) {
-            const { data: requesterData } = await supabaseAdmin.auth.admin.getUserById(request.requester_id);
-            requests.push({
-              id: request.id,
-              requester: {
-                email: requesterData?.user?.email || 'Unknown',
-                id: request.requester_id
+            try {
+              const { data: requesterData, error: requesterError } = await supabaseAdmin.auth.admin.getUserById(request.requester_id);
+              
+              if (requesterError) {
+                console.warn(`Failed to get requester data for ${request.requester_id}:`, requesterError);
               }
-            });
+              
+              requests.push({
+                id: request.id,
+                requester: {
+                  email: requesterData?.user?.email || 'Unknown User',
+                  id: request.requester_id,
+                  name: requesterData?.user?.user_metadata?.name || requesterData?.user?.email || 'Unknown'
+                },
+                created_at: request.created_at,
+                status: request.status
+              });
+            } catch (userError) {
+              console.error(`Error processing request ${request.id}:`, userError);
+              // Include the request even if we can't get user details
+              requests.push({
+                id: request.id,
+                requester: {
+                  email: 'Unknown User',
+                  id: request.requester_id,
+                  name: 'Unknown'
+                },
+                created_at: request.created_at,
+                status: request.status
+              });
+            }
           }
+          
+          console.log('Processed pending requests successfully:', requests.length);
           return createCorsResponse(requests, 200);
+          
+        } catch (error) {
+          console.error('GET_PENDING_REQUESTS error:', error);
+          return createCorsResponse({ error: error.message || 'Failed to fetch pending requests' }, 500);
         }
       }
 
@@ -433,118 +478,23 @@ $$;`
           if (error) throw new Error(error.message);
           if (!data) throw new Error('Request not found or you do not have permission to update it');
 
-          // Only create access control relationship when request is accepted
-          if (new_status === 'accepted') {
-            try {
-              const requestData = data;
-              
-              // Get the public.users IDs for both requester and receiver
-              const [requesterAuth, receiverAuth] = await Promise.all([
-                supabaseAdmin.auth.admin.getUserById(requestData.requester_id),
-                supabaseAdmin.auth.admin.getUserById(requestData.receiver_id)
-              ]);
-              
-              // Find their corresponding public.users records
-              const { data: requesterPublic } = await supabaseAdmin
-                .from('users')
-                .select('id')
-                .eq('auth_user_id', requestData.requester_id)
-                .single();
-                
-              const { data: receiverPublic } = await supabaseAdmin
-                .from('users')
-                .select('id')
-                .eq('auth_user_id', requestData.receiver_id)
-                .single();
-              
-              if (requesterPublic && receiverPublic) {
-                // CRITICAL FIX: Always check who has admin role to determine correct access direction
-                const requesterIsAdmin = requesterAuth?.data?.user?.raw_user_meta_data?.role === 'admin';
-                const receiverIsAdmin = receiverAuth?.data?.user?.raw_user_meta_data?.role === 'admin';
-                
-                console.log('Access control creation:', {
-                  requesterIsAdmin,
-                  receiverIsAdmin,
-                  requesterId: requesterPublic.id,
-                  receiverId: receiverPublic.id
-                });
-                
-                if (requesterIsAdmin && !receiverIsAdmin) {
-                  // Admin requested access, so user (receiver) gets access to admin's (requester's) data
-                  const { error: accessError } = await supabaseAdmin
-                    .from('access_control')
-                    .insert({
-                      user_id: requesterPublic.id, // Admin's data that is being shared
-                      granted_to_user_id: receiverPublic.id, // User who gets access to admin's data
-                      granted_at: new Date().toISOString()
-                    })
-                    .select()
-                    .single();
-                    
-                  if (accessError && accessError.code !== '23505') { // Ignore duplicate key errors
-                    console.error('Failed to create admin-to-user access_control relationship:', accessError);
-                  } else {
-                    console.log('✅ User granted access to admin data successfully');
-                  }
-                } else if (!requesterIsAdmin && receiverIsAdmin) {
-                  // Regular user requested access from admin, so admin gets access to user's data
-                  const { error: accessError } = await supabaseAdmin
-                    .from('access_control')
-                    .insert({
-                      user_id: requesterPublic.id, // User's data that is being shared
-                      granted_to_user_id: receiverPublic.id, // Admin who gets access to user's data
-                      granted_at: new Date().toISOString()
-                    })
-                    .select()
-                    .single();
-                    
-                  if (accessError && accessError.code !== '23505') { // Ignore duplicate key errors
-                    console.error('Failed to create user-to-admin access_control relationship:', accessError);
-                  } else {
-                    console.log('✅ Admin granted access to user data successfully');
-                  }
-                } else {
-                  // Both are regular users or both are admins - requester gets access to receiver's data
-                  const { error: accessError } = await supabaseAdmin
-                    .from('access_control')
-                    .insert({
-                      user_id: receiverPublic.id, // Receiver's data that is being shared
-                      granted_to_user_id: requesterPublic.id, // Requester who gets access
-                      granted_at: new Date().toISOString()
-                    })
-                    .select()
-                    .single();
-                    
-                  if (accessError && accessError.code !== '23505') { // Ignore duplicate key errors
-                    console.error('Failed to create peer access_control relationship:', accessError);
-                  } else {
-                    console.log('✅ Peer access granted successfully');
-                  }
-                }
-              }
-            } catch (relationshipError) {
-              console.error('Error creating access relationship:', relationshipError);
-              // Don't fail the request update if relationship creation fails
-            }
-          }
+          // IMPORTANT: DO NOT automatically create access_control relationships here.
+          // Access control relationships (assignee status) should ONLY be created
+          // through the dedicated Assignees section in Settings.
+          // 
+          // Accepting an access request should only:
+          // 1. Update the request status to 'accepted'
+          // 2. Allow the admin to toggle "Can View Other Users' Data" permission
+          // 
+          // The assignee relationship is a separate concept and should be managed separately.
+          
+          console.log('Access request accepted. Assignee relationships must be created manually through Assignees section.');
           
           return createCorsResponse({ success: true, data }, 200);
         } catch (error) {
           console.error('UPDATE_REQUEST_STATUS error:', error);
           return createCorsResponse({ error: error.message }, 500);
         }
-      }
-                  console.log('✅ Requester granted access to user data successfully');
-                }
-              }
-            }
-          } catch (relationshipError) {
-            console.error('Error creating access relationship:', relationshipError);
-            // Don't fail the request update if relationship creation fails
-          }
-        }
-        
-        return createCorsResponse({ success: true, data }, 200);
       }
 
       case 'GET_MANAGED_USERS': {
@@ -750,10 +700,18 @@ $$;`
               .eq('user_id', userId)
               .single();
 
+            // Get user role from public users table
+            const { data: publicUser } = await supabaseAdmin
+              .from('users')
+              .select('role')
+              .eq('auth_user_id', userId)
+              .single();
+
             usersWithPermissions.push({
               user_id: userId,
               email: userData?.user?.email || 'Unknown',
               name: userData?.user?.user_metadata?.name || userData?.user?.email || 'Unknown User',
+              role: userData?.user?.user_metadata?.role || publicUser?.role || 'user',
               can_view_other_users_data: permission?.can_view_other_users_data || false,
               permission_granted_by: permission?.granted_by,
               permission_updated_at: permission?.updated_at,
@@ -776,66 +734,73 @@ $$;`
         }
 
         try {
-          // Check if current user is admin or has permission to update this user
-          const { data: currentUserAuth } = await supabaseAdmin.auth.admin.getUserById(user.id);
-          const isAdmin = currentUserAuth?.user?.raw_user_meta_data?.role === 'admin';
+          console.log('UPDATE_USER_PERMISSION: Starting permission update for user:', target_user_id);
+          
+          // Check if current user is admin - try multiple methods
+          const { data: currentUserAuth, error: authError } = await supabaseAdmin.auth.admin.getUserById(user.id);
+          
+          if (authError) {
+            console.error('Failed to get current user auth data:', authError);
+            return createCorsResponse({ error: 'Failed to verify user permissions' }, 500);
+          }
+          
+          console.log('Current user auth data:', {
+            id: currentUserAuth?.user?.id,
+            email: currentUserAuth?.user?.email,
+            user_metadata: currentUserAuth?.user?.user_metadata,
+            raw_user_meta_data: currentUserAuth?.user?.raw_user_meta_data
+          });
+          
+          // Try different ways to check admin role
+          const isAdminFromUserMetadata = currentUserAuth?.user?.user_metadata?.role === 'admin';
+          const isAdminFromRawMetadata = currentUserAuth?.user?.raw_user_meta_data?.role === 'admin';
+          
+          // Also check from the public users table
+          const { data: publicUser, error: publicUserError } = await supabaseAdmin
+            .from('users')
+            .select('role')
+            .eq('auth_user_id', user.id)
+            .single();
+            
+          const isAdminFromPublicTable = publicUser?.role === 'admin';
+          
+          console.log('Admin role checks:', {
+            isAdminFromUserMetadata,
+            isAdminFromRawMetadata,
+            isAdminFromPublicTable,
+            publicUserError: publicUserError?.message
+          });
+          
+          const isAdmin = isAdminFromUserMetadata || isAdminFromRawMetadata || isAdminFromPublicTable;
           
           if (!isAdmin) {
-            return createCorsResponse({ error: 'Only admins can update user permissions' }, 403);
+            console.log('Access denied: User is not admin');
+            return createCorsResponse({ 
+              error: 'Only admins can update user permissions. Please ensure your account has admin privileges.' 
+            }, 403);
           }
-
+          
+          console.log('Admin check passed, proceeding with permission update');
+          
           // Get the public user ID for the target user
-          const { data: targetPublicUser, error: publicUserError } = await supabaseAdmin
+          const { data: targetPublicUser, error: publicUserError2 } = await supabaseAdmin
             .from('users')
-            .select('id')
+            .select('id, role')
             .eq('auth_user_id', target_user_id)
             .single();
-
-          if (publicUserError || !targetPublicUser) {
+            
+          if (publicUserError2 || !targetPublicUser) {
+            console.error('Target user not found:', publicUserError2);
             return createCorsResponse({ error: 'Target user not found' }, 404);
           }
-
-          if (can_view_other_users_data) {
-            // CREATE access control relationship: User gets access to admin's data
-            const { data: adminPublicUser } = await supabaseAdmin
-              .from('users')
-              .select('id')
-              .eq('auth_user_id', user.id)
-              .single();
-
-            if (adminPublicUser) {
-              const { error: accessError } = await supabaseAdmin
-                .from('access_control')
-                .insert({
-                  user_id: adminPublicUser.id, // Admin's data
-                  granted_to_user_id: targetPublicUser.id, // User who gets access
-                  granted_at: new Date().toISOString()
-                })
-                .select()
-                .single();
-
-              if (accessError && accessError.code !== '23505') { // Ignore duplicate key errors
-                console.error('Failed to create access control relationship:', accessError);
-              }
-            }
-          } else {
-            // REMOVE access control relationship: User loses access to admin's data
-            const { data: adminPublicUser } = await supabaseAdmin
-              .from('users')
-              .select('id')
-              .eq('auth_user_id', user.id)
-              .single();
-
-            if (adminPublicUser) {
-              await supabaseAdmin
-                .from('access_control')
-                .delete()
-                .eq('user_id', adminPublicUser.id) // Admin's data
-                .eq('granted_to_user_id', targetPublicUser.id); // User who loses access
-            }
-          }
-
+          
+          console.log('Target user found:', targetPublicUser.id, 'current role:', targetPublicUser.role);
+          
+          // Store the original role before making changes
+          const originalRole = targetPublicUser.role;
+          
           // Update user permissions table
+          console.log('Updating user permissions table');
           const { error: permissionError } = await supabaseAdmin
             .from('user_permissions')
             .upsert({
@@ -844,15 +809,156 @@ $$;`
               granted_by: user.id,
               updated_at: new Date().toISOString()
             }, { onConflict: 'user_id' });
-
+            
+          console.log('Role permission update:', {
+            userId: target_user_id,
+            canView: can_view_other_users_data,
+          });
           if (permissionError) {
             console.error('Permission update error:', permissionError);
+            return createCorsResponse({ error: 'Failed to update user permissions' }, 500);
           }
-
-          return createCorsResponse({ success: true }, 200);
+          
+          // Update user role based on access permission
+          let newRole;
+          if (can_view_other_users_data) {
+            // When enabling access, change role to 'admin'
+            newRole = 'admin';
+            console.log('Enabling access - changing user role to admin');
+          } else {
+            // When disabling access, revert to regular 'user' role
+            newRole = 'user';
+            console.log(`Disabling access - reverting user role to ${newRole}`);
+          }
+          
+          console.log(`About to update role from '${originalRole}' to '${newRole}' for user ${target_user_id}`);
+          
+          // Track if role updates succeed
+          let publicRoleUpdateSuccess = false;
+          let authRoleUpdateSuccess = false;
+          
+          // Update role in public.users table
+          try {
+            const { error: roleUpdateError, data: roleUpdateData } = await supabaseAdmin
+              .from('users')
+              .update({ role: newRole })
+              .eq('auth_user_id', target_user_id)
+              .select();
+              
+            if (roleUpdateError) {
+              console.error('Public users table role update error:', roleUpdateError);
+            } else {
+              console.log(`Successfully updated public users table role to: ${newRole}`, roleUpdateData);
+              publicRoleUpdateSuccess = true;
+            }
+          } catch (publicRoleError) {
+            console.error('Exception during public role update:', publicRoleError);
+          }
+          
+          // Update role in auth.users metadata
+          try {
+            const { error: authRoleError, data: authRoleData } = await supabaseAdmin.auth.admin.updateUserById(
+              target_user_id,
+              {
+                user_metadata: {
+                  role: newRole
+                }
+              }
+            );
+            
+            if (authRoleError) {
+              console.error('Auth metadata role update error:', authRoleError);
+            } else {
+              console.log(`Successfully updated auth metadata role to: ${newRole}`, authRoleData);
+              authRoleUpdateSuccess = true;
+            }
+          } catch (authUpdateError) {
+            console.error('Exception during auth metadata update:', authUpdateError);
+          }
+          
+          console.log('Role update summary:', {
+            originalRole,
+            newRole,
+            publicRoleUpdateSuccess,
+            authRoleUpdateSuccess
+          });
+          
+          console.log('Permission and role update completed successfully');
+          return createCorsResponse({ 
+            success: true, 
+            message: `User permission ${can_view_other_users_data ? 'granted' : 'revoked'} successfully. Role updated to ${newRole}.`,
+            newRole: newRole
+          }, 200);
+          
         } catch (error) {
           console.error('UPDATE_USER_PERMISSION error:', error);
-          return createCorsResponse({ error: error.message }, 500);
+          return createCorsResponse({ error: error.message || 'Failed to update permission' }, 500);
+        }
+      }
+
+      case 'CREATE_ASSIGNEE_RELATIONSHIP': {
+        const { admin_user_id, assignee_user_id } = payload ?? {};
+        if (!admin_user_id || !assignee_user_id) {
+          return createCorsResponse({ error: 'admin_user_id and assignee_user_id are required' }, 400);
+        }
+
+        try {
+          console.log('CREATE_ASSIGNEE_RELATIONSHIP: Creating assignee relationship');
+          
+          // Use the database function to create the relationship
+          const { data, error } = await supabaseAdmin.rpc('create_assignee_relationship', {
+            admin_user_id: user.id,  // Use current authenticated user
+            assignee_user_id: assignee_user_id
+          });
+          
+          if (error) {
+            console.error('Failed to create assignee relationship:', error);
+            return createCorsResponse({ error: 'Failed to create assignee relationship' }, 500);
+          }
+          
+          if (!data) {
+            return createCorsResponse({ error: 'Permission denied: Only admins can create assignee relationships' }, 403);
+          }
+          
+          console.log('Assignee relationship created successfully');
+          return createCorsResponse({ success: true, message: 'Assignee relationship created successfully' }, 200);
+          
+        } catch (error) {
+          console.error('CREATE_ASSIGNEE_RELATIONSHIP error:', error);
+          return createCorsResponse({ error: error.message || 'Failed to create assignee relationship' }, 500);
+        }
+      }
+
+      case 'REMOVE_ASSIGNEE_RELATIONSHIP': {
+        const { admin_user_id, assignee_user_id } = payload ?? {};
+        if (!admin_user_id || !assignee_user_id) {
+          return createCorsResponse({ error: 'admin_user_id and assignee_user_id are required' }, 400);
+        }
+
+        try {
+          console.log('REMOVE_ASSIGNEE_RELATIONSHIP: Removing assignee relationship');
+          
+          // Use the database function to remove the relationship
+          const { data, error } = await supabaseAdmin.rpc('remove_assignee_relationship', {
+            admin_user_id: user.id,  // Use current authenticated user
+            assignee_user_id: assignee_user_id
+          });
+          
+          if (error) {
+            console.error('Failed to remove assignee relationship:', error);
+            return createCorsResponse({ error: 'Failed to remove assignee relationship' }, 500);
+          }
+          
+          if (!data) {
+            return createCorsResponse({ error: 'Permission denied: Only admins can remove assignee relationships' }, 403);
+          }
+          
+          console.log('Assignee relationship removed successfully');
+          return createCorsResponse({ success: true, message: 'Assignee relationship removed successfully' }, 200);
+          
+        } catch (error) {
+          console.error('REMOVE_ASSIGNEE_RELATIONSHIP error:', error);
+          return createCorsResponse({ error: error.message || 'Failed to remove assignee relationship' }, 500);
         }
       }
 
