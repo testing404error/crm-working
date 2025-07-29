@@ -1,88 +1,144 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabase = createClient(
-  'https://qgoqrozkqckgvdopbllg.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFnb3Fyb3prcWNrZ3Zkb3BibGxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE2MTIwODgsImV4cCI6MjA2NzE4ODA4OH0.D4wXbpbtnX1ZjWvLCfTzSRKvLu2yoO0Eo6jtUMmoZ18'
-);
+const supabaseUrl = 'https://qgoqrozkqckgvdopbllg.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFnb3Fyb3prcWNrZ3Zkb3BibGxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE2MTIwODgsImV4cCI6MjA2NzE4ODA4OH0.D4wXbpbtnX1ZjWvLCfTzSRKvLu2yoO0Eo6jtUMmoZ18';
+
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function debugAssigneeIssue() {
-  console.log('🔍 DEBUGGING ASSIGNEE ACCESS ISSUE\n');
-  
-  const assigneeEmail = 'yaravij907@kissgy.com';
-  const problemEmail = 'pandeyankit54562@gmail.com';
-  
-  // 1. Check assignee setup
-  console.log('1. Checking assignee setup...');
-  const { data: assigneeUser } = await supabase
-    .from('assignee_users')
-    .select('*')
-    .eq('email', assigneeEmail)
-    .single();
-  
-  if (assigneeUser) {
-    console.log(`✅ Assignee found: ${assigneeUser.name} (${assigneeUser.email}) - ID: ${assigneeUser.id}`);
-    
-    // 2. Check assignee relationships
-    console.log('\n2. Checking assignee relationships...');
-    const { data: relationships } = await supabase
-      .from('assignee_relationships')
+  console.log('🔍 Debugging Assignee Feature...\n');
+
+  try {
+    // 1. Check access_control table structure
+    console.log('1. Checking access_control table structure...');
+    const { data: tableInfo, error: tableError } = await supabase
+      .from('access_control')
       .select('*')
-      .eq('assignee_id', assigneeUser.id);
+      .limit(1);
     
-    console.log(`Found ${relationships?.length || 0} relationships:`);
-    relationships?.forEach(rel => {
-      console.log(`   - Assigned to user: ${rel.user_id} (created by: ${rel.created_by})`);
-    });
+    if (tableError) {
+      console.error('❌ access_control table not found or error:', tableError);
+      return;
+    }
+    console.log('✅ access_control table exists');
+
+    // 2. Check if there are any access_control records
+    console.log('\n2. Checking existing access_control records...');
+    const { data: allGrants, error: grantsError } = await supabase
+      .from('access_control')
+      .select('*');
     
-    // 3. Check the problem user's data
-    console.log('\n3. Investigating problem user data...');
-    const { data: problemLeads } = await supabase
-      .from('leads')
-      .select('id, name, email, user_id')
-      .ilike('email', `%${problemEmail}%`);
-    
-    console.log(`Found ${problemLeads?.length || 0} leads with email ${problemEmail}:`);
-    problemLeads?.forEach(lead => {
-      console.log(`   - Lead: "${lead.name}" (${lead.email}) - Created by user: ${lead.user_id}`);
-    });
-    
-    // 4. Check if the problem user ID matches any assignee relationship
-    if (problemLeads && problemLeads.length > 0) {
-      const problemUserId = problemLeads[0].user_id;
-      console.log(`\n4. Checking if problem user (${problemUserId}) matches assignee relationship...`);
-      
-      const matchingRelation = relationships?.find(rel => rel.user_id === problemUserId);
-      if (matchingRelation) {
-        console.log(`⚠️ FOUND MATCH: Problem user ${problemUserId} IS in assignee relationships!`);
-        console.log(`   This means assignee should see this data (working as intended)`);
-      } else {
-        console.log(`❌ NO MATCH: Problem user ${problemUserId} is NOT in assignee relationships`);
-        console.log(`   This is the BUG - assignee shouldn't see this data!`);
+    if (grantsError) {
+      console.error('❌ Error fetching grants:', grantsError);
+    } else {
+      console.log(`✅ Found ${allGrants?.length || 0} access control grants:`);
+      if (allGrants && allGrants.length > 0) {
+        allGrants.forEach((grant, index) => {
+          console.log(`   Grant ${index + 1}: user_id=${grant.user_id}, granted_to_user_id=${grant.granted_to_user_id}`);
+        });
       }
     }
+
+    // 3. Check users table and their roles
+    console.log('\n3. Checking users table and roles...');
+    const { data: users, error: usersError } = await supabase
+      .from('users')
+      .select('id, auth_user_id, email, role');
     
-    // 5. Check all users that assignee should have access to
-    console.log('\n5. All users assignee should have access to:');
-    relationships?.forEach(rel => {
-      console.log(`   - User ID: ${rel.user_id}`);
-    });
+    if (usersError) {
+      console.error('❌ Error fetching users:', usersError);
+    } else {
+      console.log(`✅ Found ${users?.length || 0} users:`);
+      if (users && users.length > 0) {
+        users.forEach((user, index) => {
+          console.log(`   User ${index + 1}: id=${user.id}, email=${user.email}, role=${user.role}`);
+        });
+      }
+    }
+
+    // 4. Test the foreign key relationship
+    console.log('\n4. Testing foreign key relationship...');
+    const { data: joinTest, error: joinError } = await supabase
+      .from('access_control')
+      .select(`
+        user_id,
+        granted_to_user_id,
+        users!access_control_user_id_fkey(id, email, role)
+      `);
     
-    // 6. Check what the access control service should return
-    console.log('\n6. What accessControlService.getAccessibleUserIds() should return:');
-    console.log(`   - Own ID: [would be auth user ID when logged in]`);
-    relationships?.forEach(rel => {
-      console.log(`   - Admin ID: ${rel.user_id}`);
-    });
+    if (joinError) {
+      console.error('❌ Foreign key join error:', joinError);
+    } else {
+      console.log('✅ Foreign key join test successful');
+      if (joinTest && joinTest.length > 0) {
+        joinTest.forEach((item, index) => {
+          console.log(`   Join ${index + 1}: user_id=${item.user_id}, grantor=${JSON.stringify(item.users)}`);
+        });
+      }
+    }
+
+    // 5. Test the specific query used in accessControlService
+    console.log('\n5. Testing specific query from accessControlService...');
     
-    console.log(`\n🎯 EXPECTED BEHAVIOR:`);
-    console.log(`   Assignee should ONLY see leads from these user IDs:`);
-    console.log(`   - Their own auth user ID`);
-    relationships?.forEach(rel => {
-      console.log(`   - Admin user ID: ${rel.user_id}`);
-    });
+    // First, get current user to test with
+    const { data: { user: currentUser } } = await supabase.auth.getUser();
+    if (!currentUser) {
+      console.log('❌ No authenticated user found');
+      return;
+    }
+
+    // Get current user's database ID
+    const { data: currentDbUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('auth_user_id', currentUser.id)
+      .single();
     
-  } else {
-    console.log('❌ Assignee not found');
+    if (!currentDbUser) {
+      console.log('❌ Current user not found in database');
+      return;
+    }
+
+    console.log(`Current user DB ID: ${currentDbUser.id}`);
+
+    // Test the exact query from accessControlService
+    const { data: accessGrants, error: accessError } = await supabase
+      .from('access_control')
+      .select(`
+        user_id,
+        users!access_control_user_id_fkey(auth_user_id, role)
+      `)
+      .eq('granted_to_user_id', currentDbUser.id);
+    
+    if (accessError) {
+      console.error('❌ Access grants query error:', accessError);
+    } else {
+      console.log(`✅ Access grants query successful - found ${accessGrants?.length || 0} grants`);
+      if (accessGrants && accessGrants.length > 0) {
+        accessGrants.forEach((grant, index) => {
+          console.log(`   Grant ${index + 1}: user_id=${grant.user_id}, grantor_info=${JSON.stringify(grant.users)}`);
+          
+          // Check if grantor is admin
+          const grantorUser = grant.users;
+          if (grantorUser?.role === 'admin') {
+            console.log(`   ✅ This grant is from an admin - should provide access to user ${grant.user_id}`);
+          } else {
+            console.log(`   ❌ This grant is NOT from an admin (role: ${grantorUser?.role})`);
+          }
+        });
+      } else {
+        console.log('   No grants found for current user');
+      }
+    }
+
+    console.log('\n🎯 Debug Summary:');
+    console.log('- Check if access_control records exist');
+    console.log('- Verify foreign key relationships work');
+    console.log('- Ensure the grantor users have admin role');
+    console.log('- Confirm the query returns expected results');
+
+  } catch (error) {
+    console.error('❌ Debug script error:', error);
   }
 }
 

@@ -1,6 +1,42 @@
-import React from 'react';
-import { Lead } from '../../types';
+import React, { useState, useEffect } from 'react';
+import { Lead, Assignee } from '../../types';
+import { getAssignees } from '../../services/assigneeService';
 import { Mail, Phone, MapPin, Edit, Trash2, Star, MessageCircle, Tag, MessageSquare, History } from 'lucide-react';
+
+// Component to display assignee name from UUID
+const AssigneeDisplay: React.FC<{ assignedTo: string | null }> = ({ assignedTo }) => {
+  const [assigneeName, setAssigneeName] = useState<string>('Unassigned');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!assignedTo) {
+      setAssigneeName('Unassigned');
+      return;
+    }
+
+    const fetchAssigneeName = async () => {
+      setLoading(true);
+      try {
+        const assignees = await getAssignees();
+        const assignee = assignees.find(a => a.id === assignedTo);
+        setAssigneeName(assignee?.name || 'Unknown User');
+      } catch (error) {
+        console.error('Failed to fetch assignee name:', error);
+        setAssigneeName('Unknown User');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAssigneeName();
+  }, [assignedTo]);
+
+  if (loading) {
+    return <span className="text-gray-400">Loading...</span>;
+  }
+
+  return <span>{assigneeName}</span>;
+};
 
 interface LeadsListProps {
   leads: Lead[];
@@ -214,7 +250,7 @@ export const LeadsList: React.FC<LeadsListProps> = ({
                   </div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {lead.assigned_to || 'Unassigned'}
+                  <AssigneeDisplay assignedTo={lead.assigned_to} />
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                   {new Date(lead.created_at).toLocaleDateString()}

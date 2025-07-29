@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { useAuth } from '../../contexts/AuthContext';
 
 export const UserManagement: React.FC = () => {
+  const { user } = useAuth();
   const [managedUsers, setManagedUsers] = useState<any[]>([]);
   const [accessHistory, setAccessHistory] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -19,6 +20,9 @@ export const UserManagement: React.FC = () => {
   const [needsSetup, setNeedsSetup] = useState(false);
   const [isSettingUp, setIsSettingUp] = useState(false);
   const [setupInstructions, setSetupInstructions] = useState<any>(null);
+  
+  // Check if current user is admin
+  const isAdmin = user?.role === 'admin';
 
   // Setup database table if needed
   const setupDatabase = async () => {
@@ -290,7 +294,25 @@ export const UserManagement: React.FC = () => {
     <div className="p-6">
       <div className="mb-6">
         <h2 className="text-xl font-semibold text-gray-900">User Access Management</h2>
-        <p className="text-sm text-gray-600 mt-1">Manage user account access and view access history.</p>
+        <p className="text-sm text-gray-600 mt-1">Manage user permissions and access control. Send access requests to users and control their data visibility.</p>
+        
+        {/* Admin Information Panel */}
+        {isAdmin && (
+          <div className="mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <div className="flex items-start space-x-3">
+              <Settings className="w-5 h-5 text-blue-600 mt-0.5" />
+              <div>
+                <h4 className="font-semibold text-blue-900 mb-2">Admin Role Behavior</h4>
+                <ul className="text-sm text-blue-800 space-y-1">
+                  <li>✅ You automatically have access to all leads and opportunities created by any user</li>
+                  <li>✅ Any leads/opportunities you create are automatically shared with users in your "Active Access" list</li>
+                  <li>✅ You can manage user permissions using the "Can View Other Users' Data" toggle</li>
+                  <li>❌ The old "Login As" feature has been removed for security</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -327,8 +349,11 @@ export const UserManagement: React.FC = () => {
                 {isLoading ? (
                   <tr><td colSpan={5} className="text-center p-6 text-gray-500">Loading...</td></tr>
                 ) : filteredUsers.length > 0 ? (
-                  filteredUsers.map((user) => (
-                    <tr key={user.user_id || user.access_request_id}>
+                  filteredUsers.map((user, index) => {
+                    // Create a unique key by combining multiple identifiers
+                    const uniqueKey = `user-${user.user_id || user.access_request_id}-${user.email.replace(/[^a-zA-Z0-9]/g, '')}-${index}`;
+                    return (
+                    <tr key={uniqueKey}>
                       <td className="px-6 py-4 font-medium text-gray-900">{user.email}</td>
                       <td className="px-6 py-4">
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
@@ -377,7 +402,8 @@ export const UserManagement: React.FC = () => {
                         </Button>
                       </td>
                     </tr>
-                  ))
+                    );
+                  })
                 ) : (
                   <tr><td colSpan={5} className="text-center p-6 text-gray-500">No users have granted you access yet.</td></tr>
                 )}

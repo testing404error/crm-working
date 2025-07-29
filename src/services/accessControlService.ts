@@ -19,17 +19,36 @@ export const accessControlService = {
       const adminIds: string[] = [];
       
       // Get all users from auth and check for admin role
-      const { data: authUsers } = await supabase.auth.admin.listUsers();
-      
-      if (authUsers?.users) {
-        const adminUsers = authUsers.users.filter(user => 
-          user.user_metadata?.role === 'admin'
-        );
+      try {
+        const { data: authUsers } = await supabase.auth.admin.listUsers();
         
-        const foundAdminIds = adminUsers.map(user => user.id);
-        adminIds.push(...foundAdminIds);
-        
-        console.log(`✅ Found ${foundAdminIds.length} admin users`);
+        if (authUsers?.users) {
+          const adminUsers = authUsers.users.filter(user => 
+            user.user_metadata?.role === 'admin'
+          );
+          
+          const foundAdminIds = adminUsers.map(user => user.id);
+          adminIds.push(...foundAdminIds);
+          
+          console.log(`✅ Found ${foundAdminIds.length} admin users`);
+        }
+      } catch (adminError) {
+        console.warn('Failed to fetch admin users from auth API:', adminError.message);
+        // Fallback: Try to get admin IDs from the users table with role check
+        try {
+          const { data: publicUsers } = await supabase
+            .from('users')
+            .select('auth_user_id')
+            .eq('role', 'admin');
+          
+          if (publicUsers) {
+            const publicAdminIds = publicUsers.map(u => u.auth_user_id).filter(Boolean);
+            adminIds.push(...publicAdminIds);
+            console.log(`✅ Found ${publicAdminIds.length} admin users from public table`);
+          }
+        } catch (publicError) {
+          console.warn('Failed to fetch admin users from public table:', publicError.message);
+        }
       }
       
       const uniqueAdminIds = [...new Set(adminIds)];
@@ -44,12 +63,12 @@ export const accessControlService = {
 
   /**
    * Gets all user IDs that the current user can access data for.
-   * Simplified version for new schema:
-   * 1. The user's own ID (always)
-   * 2. If user is admin: ALL user IDs in the system
-   * 3. If user has access control grants: those user IDs
+   * UPDATED BEHAVIOR:
+   * 1. ADMIN: Automatically has access to ALL leads and opportunities from ALL users
+   * 2. ASSIGNED USERS: Auto data sharing - can only see admin's data they're assigned to
+   * 3. REGULAR USERS: Only their own data + any "Can access other users' data" permission
    * 
-   * @param userId - The current user's ID
+   * @param userId - The current user's ID (database ID, not auth ID)
    * @returns Array of user IDs that the current user can access
    */
   async getAccessibleUserIds(userId: string): Promise<string[]> {
@@ -60,14 +79,13 @@ export const accessControlService = {
       // Handle authentication errors gracefully
       if (authError || !user) {
         console.warn('🔒 No authenticated user found, returning limited access');
-        // Return only the passed userId if no authenticated user
         return userId ? [userId] : [];
       }
       
       const userEmail = user.email;
       const isAdmin = user.user_metadata?.role === 'admin';
       
-      console.log(`🔍 Access Control - User: ${userEmail}, ID: ${user.id}, isAdmin: ${isAdmin}`);
+      console.log(`🔍 New Access Control - User: ${userEmail}, ID: ${user.id}, isAdmin: ${isAdmin}`);
       
       // Get the public.users table ID for the current auth user
       const { data: currentPublicUser, error: publicUserError } = await supabase
@@ -76,19 +94,15 @@ export const accessControlService = {
         .eq('auth_user_id', user.id)
         .single();
         
-      let accessibleUserIds;
-      if (publicUserError || !currentPublicUser) {
-        console.warn('Could not find public user record, using auth ID as fallback');
-        // Fallback to using auth user ID
-        accessibleUserIds = [userId];
-      } else {
-        // Use the public.users table ID
-        accessibleUserIds = [currentPublicUser.id];
-      }
+      let accessibleUserIds = [];
+      const currentDbUserId = currentPublicUser?.id || userId;
       
-      // If user is admin, they can access all data
+      // Always include own data
+      accessibleUserIds.push(currentDbUserId);
+      
+      // ✅ 1. ADMIN ROLE BEHAVIOR: Automatically access ALL leads and opportunities
       if (isAdmin) {
-        console.log('🔑 Admin user detected - granting access to all data');
+        console.log('🔑 ADMIN detected - granting access to ALL data from ALL users');
         
         // Get all user IDs from the users table
         const { data: allUsers, error: usersError } = await supabase
@@ -98,38 +112,71 @@ export const accessControlService = {
         if (!usersError && allUsers) {
           const allUserIds = allUsers.map(u => u.id);
           accessibleUserIds.push(...allUserIds);
-        } else {
-          // Fallback: get user IDs from leads and opportunities if users table fails
-          const { data: leadUsers } = await supabase.from('leads').select('user_id');
-          const { data: oppUsers } = await supabase.from('opportunities').select('user_id');
-          
-          const allUserIds = [
-            ...new Set([
-              ...(leadUsers?.map(l => l.user_id) || []),
-              ...(oppUsers?.map(o => o.user_id) || [])
-            ])
-          ].filter(Boolean);
-          
-          accessibleUserIds.push(...allUserIds);
+          console.log(`✅ Admin granted access to ${allUserIds.length} users`);
         }
         
-        return [...new Set(accessibleUserIds)];
+        const uniqueIds = [...new Set(accessibleUserIds)];
+        console.log(`🎯 Final admin accessible user IDs: ${uniqueIds.length} users`);
+        return uniqueIds;
       }
       
-      // For non-admin users, check access_control table
+      // ✅ 2. ASSIGNED USERS – Auto Data Sharing
+      // Check if this user is in the assignees list for any admin
       try {
+        // FIXED: Use direct JOIN instead of foreign key reference
         const { data: accessGrants, error: accessError } = await supabase
           .from('access_control')
-          .select('user_id')
-          .eq('granted_to_user_id', userId);
+          .select(`
+            user_id,
+            users!inner(auth_user_id, role)
+          `)
+          .eq('granted_to_user_id', currentDbUserId);
         
         if (!accessError && accessGrants) {
-          const grantedUserIds = accessGrants.map(grant => grant.user_id);
-          accessibleUserIds.push(...grantedUserIds);
-          console.log(`✅ Found ${grantedUserIds.length} access grants for user`);
+          console.log(`🔍 Found ${accessGrants.length} access grants for user ${currentDbUserId}`);
+          for (const grant of accessGrants) {
+            // Check if the grantor is an admin by checking the public users table role
+            const grantorUser = grant.users;
+            console.log(`🔍 Checking grant: user_id=${grant.user_id}, grantor_role=${grantorUser?.role}`);
+            if (grantorUser?.role === 'admin') {
+              accessibleUserIds.push(grant.user_id);
+              console.log(`✅ Assignee access granted to admin user: ${grant.user_id}`);
+            } else {
+              console.log(`❌ Grant is not from admin (role: ${grantorUser?.role})`);
+            }
+          }
+        } else if (accessError) {
+          console.warn('Access control grants query failed:', accessError.message);
+        } else {
+          console.log('✅ Access control grants query succeeded but no grants found');
         }
       } catch (accessError) {
         console.warn('Could not check access control grants:', accessError);
+      }
+      
+      // ✅ 3. "Can View Other Users' Data" Permission Check
+      try {
+        const { data: hasPermission, error: permissionError } = await supabase.rpc(
+          'user_can_view_other_users_data',
+          { check_user_id: user.id }
+        );
+        
+        if (!permissionError && hasPermission) {
+          console.log('🔓 User has "Can View Other Users Data" permission - granting access to ALL data');
+          
+          // Get all user IDs from the users table
+          const { data: allUsers, error: usersError } = await supabase
+            .from('users')
+            .select('id');
+          
+          if (!usersError && allUsers) {
+            const allUserIds = allUsers.map(u => u.id);
+            accessibleUserIds.push(...allUserIds);
+            console.log(`✅ Permission granted access to ${allUserIds.length} users`);
+          }
+        }
+      } catch (permissionError) {
+        console.warn('Could not check user view permission:', permissionError);
       }
       
       // Remove duplicates and return
@@ -139,11 +186,6 @@ export const accessControlService = {
       
     } catch (error) {
       console.error('Error getting accessible user IDs:', error);
-      // In case of error, return at least the user's own ID
-      // Also check if this is a permission error that needs attention
-      if (error instanceof Error && error.message.includes('permission denied')) {
-        console.warn('⚠️ Permission denied when checking access control. User may need admin setup.');
-      }
       return [userId];
     }
   },
@@ -168,18 +210,28 @@ export const accessControlService = {
       }
 
       // Get user details for all accessible users from auth.users
-      const { data: authData } = await supabase.auth.admin.listUsers();
-      const allAuthUsers = authData?.users || [];
-      
-      const accessibleUsers = allAuthUsers.filter(user => 
-        accessibleUserIds.includes(user.id)
-      );
+      try {
+        const { data: authData } = await supabase.auth.admin.listUsers();
+        const allAuthUsers = authData?.users || [];
+        
+        const accessibleUsers = allAuthUsers.filter(user => 
+          accessibleUserIds.includes(user.id)
+        );
 
-      return accessibleUsers.map(user => ({
-        id: user.id,
-        email: user.email || '',
-        name: user.user_metadata?.name || user.email || 'Unknown User'
-      }));
+        return accessibleUsers.map(user => ({
+          id: user.id,
+          email: user.email || '',
+          name: user.user_metadata?.name || user.email || 'Unknown User'
+        }));
+      } catch (adminError) {
+        console.warn('Failed to fetch user details from admin API:', adminError.message);
+        // Fallback: return basic info for accessible user IDs
+        return accessibleUserIds.map(id => ({
+          id,
+          email: `user-${id.slice(0, 8)}@example.com`,
+          name: `User ${id.slice(0, 8)}`
+        }));
+      }
     } catch (error) {
       console.error('Error getting accessible users:', error);
       return [];

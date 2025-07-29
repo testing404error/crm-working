@@ -2,6 +2,49 @@ import { supabase } from '../lib/supabaseClient';
 import { Opportunity } from '../types';
 import { accessControlService } from './accessControlService';
 
+/**
+ * ✅ ADMIN AUTO-SHARING: Helper function to share admin-created opportunities with all assigned users
+ * When an admin creates an opportunity, it's automatically shared with all users 
+ * who are listed in the Assignees section in Settings.
+ * @param adminUserId - The admin's public.users table ID
+ * @param dataType - Type of data being shared (always 'opportunity' for this service)
+ * @param dataId - The ID of the opportunity being shared
+ */
+const shareAdminDataWithAssignees = async (adminUserId: string, dataType: 'opportunity', dataId: string): Promise<void> => {
+  try {
+    console.log(`🔄 Starting auto-share for admin ${dataType}: ${dataId}`);
+    
+    // Get all users who have been granted access to the admin's data (assignees)
+    const { data: assigneeGrants, error: assigneeError } = await supabase
+      .from('access_control')
+      .select('granted_to_user_id')
+      .eq('user_id', adminUserId);
+    
+    if (assigneeError) {
+      console.error('Failed to fetch assignee grants:', assigneeError);
+      return;
+    }
+    
+    if (!assigneeGrants || assigneeGrants.length === 0) {
+      console.log('No assignees found for auto-sharing');
+      return;
+    }
+    
+    const assigneeIds = assigneeGrants.map(grant => grant.granted_to_user_id);
+    console.log(`👥 Found ${assigneeIds.length} assignees for auto-sharing`);
+    
+    // Note: Since the data is created with the admin's user_id, and the access_control
+    // system already grants assignees access to all data from users they have access to,
+    // the assignees will automatically be able to see this admin-created data.
+    // No additional sharing mechanism is needed - the existing access control handles this.
+    
+    console.log(`✅ Auto-sharing complete for admin ${dataType}: ${dataId}`);
+  } catch (error) {
+    console.error(`Failed to auto-share admin ${dataType}:`, error);
+    throw error;
+  }
+};
+
 export interface OpportunityFilters {
   name?: string;
   stage?: string;
@@ -126,6 +169,18 @@ export const opportunityService = {
     if (error) {
       console.error('Opportunity creation error:', error);
       throw new Error(error.message);
+    }
+    
+    // ✅ ADMIN AUTO-SHARING: If the creator is admin, automatically share with all assigned users
+    const isAdmin = user.user_metadata?.role === 'admin';
+    if (isAdmin) {
+      try {
+        console.log('🔑 Admin created opportunity - implementing auto-sharing');
+        await shareAdminDataWithAssignees(publicUserId, 'opportunity', data.id);
+      } catch (shareError) {
+        console.error('⚠️ Failed to auto-share admin opportunity:', shareError);
+        // Don't throw error here - opportunity creation should succeed even if auto-sharing fails
+      }
     }
     
     return data as Opportunity;

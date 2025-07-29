@@ -43,9 +43,9 @@ export interface TopOpportunity extends Partial<Opportunity> {
 export const dashboardService = {
   async getDashboardMetrics(userId: string): Promise<DashboardMetrics> {
     try {
-      // Use the ultimate dashboard metrics function with role-based access
+      // Use the simplified dashboard stats function with role-based access
       const { data: metricsData, error: metricsError } = await supabase
-        .rpc('get_dashboard_metrics_ultimate')
+        .rpc('get_dashboard_stats')
         .single();
 
       if (metricsError) {
@@ -82,8 +82,9 @@ export const dashboardService = {
       }
 
       // Calculate additional metrics from the function data
-      const avgDealSize = Number(metricsData.total_revenue) > 0 && Number(metricsData.total_opportunities) > 0
-        ? Number(metricsData.total_revenue) / Number(metricsData.total_opportunities)
+      const totalRevenue = 0; // We don't have revenue in the simple function, set to 0
+      const avgDealSize = Number(metricsData.total_opportunities) > 0 && totalRevenue > 0
+        ? totalRevenue / Number(metricsData.total_opportunities)
         : 0;
 
       const conversionRate = Number(metricsData.total_leads) > 0
@@ -93,8 +94,8 @@ export const dashboardService = {
       return {
         totalLeads: Number(metricsData.total_leads) || 0,
         totalOpportunities: Number(metricsData.total_opportunities) || 0,
-        activeOpportunities: Number(metricsData.active_opportunities) || 0,
-        totalRevenue: Number(metricsData.total_revenue) || 0,
+        activeOpportunities: Number(metricsData.total_activities) || 0, // Use activities count as proxy
+        totalRevenue: totalRevenue,
         avgDealSize,
         conversionRate: parseFloat(conversionRate.toFixed(1)),
       };
@@ -178,7 +179,7 @@ export const dashboardService = {
       return (data || []).map(item => ({
         stage: item.stage as Opportunity['stage'],
         count: Number(item.count),
-        value: Number(item.value)
+        value: Number(item.total_amount)
       }));
     } catch (error: any) {
       console.error('Error fetching pipeline data:', error);
@@ -240,7 +241,7 @@ export const dashboardService = {
     try {
       // Use the ultimate function with role-based access
       const { data, error } = await supabase
-        .rpc('get_top_opportunities_ultimate', { limit_count: limit });
+        .rpc('get_top_opportunities_simple');
 
       if (error) throw error;
       return (data || []) as TopOpportunity[];

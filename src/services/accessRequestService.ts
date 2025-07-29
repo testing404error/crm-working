@@ -14,7 +14,7 @@ export const accessRequestService = {
    */
   getAvailableUsers: async (): Promise<ApiResponse<any[]>> => {
     try {
-      const { data, error } = await supabase.functions.invoke('access-request-handler', {
+      const { data, error } = await supabase.functions.invoke('api', {
         body: { action: 'GET_AVAILABLE_USERS' },
       });
       if (error) throw new Error(error.message);
@@ -31,7 +31,7 @@ export const accessRequestService = {
    */
   sendRequest: async (receiver_id: string): Promise<ApiResponse<any>> => {
     try {
-      const { data, error } = await supabase.functions.invoke('access-request-handler', {
+      const { data, error } = await supabase.functions.invoke('api', {
         body: { 
           action: 'SEND_REQUEST',
           payload: { receiver_id }
@@ -49,7 +49,7 @@ export const accessRequestService = {
    */
   getPendingRequests: async (): Promise<ApiResponse<any[]>> => {
     try {
-      const { data, error } = await supabase.functions.invoke('access-request-handler', {
+      const { data, error } = await supabase.functions.invoke('api', {
         body: { action: 'GET_PENDING_REQUESTS' },
       });
       if (error) throw new Error(error.message);
@@ -66,7 +66,7 @@ export const accessRequestService = {
    */
   updateRequestStatus: async (request_id: string, new_status: 'accepted' | 'rejected'): Promise<ApiResponse<any>> => {
     try {
-      const { data, error } = await supabase.functions.invoke('access-request-handler', {
+      const { data, error } = await supabase.functions.invoke('api', {
         body: {
           action: 'UPDATE_REQUEST_STATUS',
           payload: { request_id, new_status }

@@ -10,29 +10,27 @@ import { Assignee } from '../types';
  */
 export const getAssignees = async (): Promise<Assignee[]> => {
   try {
-    // First try with status column
-    let { data, error } = await supabase
+    console.log('🔍 Fetching assignees from users table...');
+    
+    const { data, error } = await supabase
       .from('users')
-      .select('id, name, email, role, status')
-      .eq('status', 'Active')  // Only active users
+      .select('id, name, email, role')
       .order('name');
     
-    // If status column doesn't exist, fetch without status filter
-    if (error && error.message.includes('column users.status does not exist')) {
-      console.warn('Status column not found, fetching all users');
-      const fallbackResult = await supabase
-        .from('users')
-        .select('id, name, email, role')
-        .order('name');
-      
-      if (fallbackResult.error) throw new Error(fallbackResult.error.message);
-      // Add default status for compatibility
-      data = (fallbackResult.data || []).map(user => ({ ...user, status: 'Active' }));
-    } else if (error) {
+    if (error) {
+      console.error('Error fetching users:', error);
       throw new Error(error.message);
     }
     
-    return data || [];
+    console.log(`✅ Fetched ${data?.length || 0} users for assignment`);
+    
+    // Add default status for compatibility
+    const assignees = (data || []).map(user => ({ 
+      ...user, 
+      status: 'Active' 
+    }));
+    
+    return assignees;
   } catch (error) {
     console.error('Error fetching assignees:', error);
     return [];

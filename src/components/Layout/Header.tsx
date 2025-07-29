@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
-import { Search, Bell, User as UserIcon, Plus, Menu } from 'lucide-react';
+import { Search, Bell, User as UserIcon, Plus, Menu, RefreshCw } from 'lucide-react';
 import { Button } from '../ui/button';
 import {
   DropdownMenu,
@@ -31,19 +31,18 @@ export const Header: React.FC<HeaderProps> = ({ onMenuToggle, onInviteUserClick 
   const { user } = useAuth();
   const [requests, setRequests] = useState<Request[]>([]);
 
-  // Function to fetch pending requests (TEMPORARILY DISABLED)
+  // Function to fetch pending requests
   const fetchRequests = async () => {
     try {
-      // Temporarily disable API calls to fix 401 error
-      // const { data, error } = await apiService.getPendingRequests();
-      // if (error) {
-      //   console.error("Failed to fetch requests:", error);
-      // } else if (data) {
-      //   setRequests(data);
-      // }
-      setRequests([]); // Set empty array for now
+      const { data, error } = await apiService.getPendingRequests();
+      if (error) {
+        console.error("Failed to fetch requests:", error);
+        setRequests([]);
+      } else if (data) {
+        setRequests(data);
+      }
     } catch (error) {
-      console.warn('API service temporarily disabled:', error);
+      console.error('Error fetching pending requests:', error);
       setRequests([]);
     }
   };
@@ -51,9 +50,9 @@ export const Header: React.FC<HeaderProps> = ({ onMenuToggle, onInviteUserClick 
   // Fetch requests when the component mounts and poll for updates
   useEffect(() => {
     fetchRequests();
-    // Temporarily disable polling to reduce API calls
-    // const interval = setInterval(fetchRequests, 30000); // Poll every 30 seconds
-    // return () => clearInterval(interval);
+    // Poll every 30 seconds for real-time notifications
+    const interval = setInterval(fetchRequests, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleRequestUpdate = async (requestId: string, status: 'accepted' | 'rejected') => {
@@ -83,13 +82,11 @@ export const Header: React.FC<HeaderProps> = ({ onMenuToggle, onInviteUserClick 
           {/* Admin Status Indicator */}
           <AdminStatusIndicator />
           
-          {/* Only show Request Access button to admin users */}
-          {user?.role === 'admin' && (
-            <Button onClick={onInviteUserClick}>
-              <Plus className="w-4 h-4 mr-2" />
-              Request Access
-            </Button>
-          )}
+          {/* Request Access button available to all users */}
+          <Button onClick={onInviteUserClick}>
+            <Plus className="w-4 h-4 mr-2" />
+            Request Access
+          </Button>
 
           {/* --- NOTIFICATION BELL DROPDOWN --- */}
           <DropdownMenu>

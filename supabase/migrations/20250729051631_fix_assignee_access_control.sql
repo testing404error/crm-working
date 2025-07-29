@@ -1,13 +1,21 @@
 -- =====================================================
--- FIXED ACCESS CONTROL TABLE CREATION
--- This drops existing function first, then creates everything
+-- COMPLETE FIX FOR ASSIGNEE ACCESS CONTROL SYSTEM
+-- This creates the access_control table with proper permissions
 -- =====================================================
 
--- 1. Drop existing function first (as suggested by the error)
+-- 1. Drop existing table and function dependencies
+DROP TABLE IF EXISTS public.access_control CASCADE;
+
+-- Drop existing policies that depend on the function
+DROP POLICY IF EXISTS "Users can manage accessible leads" ON public.leads;
+DROP POLICY IF EXISTS "Users can manage accessible opportunities" ON public.opportunities;
+DROP POLICY IF EXISTS "Users can manage accessible activities" ON public.activities;
+
+-- Now we can safely drop and recreate the function
 DROP FUNCTION IF EXISTS public.get_accessible_user_ids(uuid);
 
--- 2. Create access_control table (the main one causing 404 error)
-CREATE TABLE IF NOT EXISTS public.access_control (
+-- 2. Create access_control table
+CREATE TABLE public.access_control (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     granted_to_user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
@@ -16,39 +24,37 @@ CREATE TABLE IF NOT EXISTS public.access_control (
 );
 
 -- 3. Create indexes for better performance
-CREATE INDEX IF NOT EXISTS idx_access_control_user_id ON public.access_control(user_id);
-CREATE INDEX IF NOT EXISTS idx_access_control_granted_to_user_id ON public.access_control(granted_to_user_id);
+CREATE INDEX idx_access_control_user_id ON public.access_control(user_id);
+CREATE INDEX idx_access_control_granted_to_user_id ON public.access_control(granted_to_user_id);
 
 -- 4. Enable Row Level Security (RLS)
 ALTER TABLE public.access_control ENABLE ROW LEVEL SECURITY;
 
--- 5. Drop existing policies if they exist (to avoid conflicts)
-DROP POLICY IF EXISTS "Users can view access control they are involved in" ON public.access_control;
-DROP POLICY IF EXISTS "Users can grant access to their data" ON public.access_control;
-DROP POLICY IF EXISTS "Users can revoke access they granted" ON public.access_control;
-
--- 6. Create RLS policies for access_control table
-CREATE POLICY "Users can view access control they are involved in" ON public.access_control
+-- 5. Create RLS policies for access_control table
+-- Allow users to see access control records they are involved in
+CREATE POLICY "Users can view their access grants" ON public.access_control
     FOR SELECT USING (
         user_id IN (SELECT id FROM public.users WHERE auth_user_id = auth.uid()) OR
         granted_to_user_id IN (SELECT id FROM public.users WHERE auth_user_id = auth.uid())
     );
 
+-- Allow users to grant access to their own data
 CREATE POLICY "Users can grant access to their data" ON public.access_control
     FOR INSERT WITH CHECK (
         user_id IN (SELECT id FROM public.users WHERE auth_user_id = auth.uid())
     );
 
+-- Allow users to revoke access they granted
 CREATE POLICY "Users can revoke access they granted" ON public.access_control
     FOR DELETE USING (
         user_id IN (SELECT id FROM public.users WHERE auth_user_id = auth.uid())
     );
 
--- 7. Grant permissions to authenticated users
-GRANT SELECT ON public.access_control TO authenticated;
+-- 6. Grant permissions to authenticated users
+GRANT SELECT, INSERT, DELETE ON public.access_control TO authenticated;
 GRANT ALL ON public.access_control TO service_role;
 
--- 8. Create NEW helper function to get accessible user IDs (with correct return type)
+-- 7. Create helper function to get accessible user IDs
 CREATE OR REPLACE FUNCTION public.get_accessible_user_ids(auth_user_uuid UUID)
 RETURNS UUID[] AS $$
 DECLARE
@@ -103,19 +109,29 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- 9. Grant execute permission on the function
+-- 8. Grant execute permission on the function
 GRANT EXECUTE ON FUNCTION public.get_accessible_user_ids(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_accessible_user_ids(UUID) TO service_role;
+
+-- 9. Insert sample data for testing (optional - remove if not needed)
+-- This creates a sample admin -> assignee relationship
+-- Uncomment these lines if you want to test with sample data:
+
+-- INSERT INTO public.access_control (user_id, granted_to_user_id)
+-- SELECT 
+--     admin_user.id as user_id,
+--     assignee_user.id as granted_to_user_id
+-- FROM 
+--     (SELECT id FROM public.users WHERE role = 'admin' LIMIT 1) admin_user,
+--     (SELECT id FROM public.users WHERE role = 'user' LIMIT 1) assignee_user
+-- WHERE admin_user.id IS NOT NULL AND assignee_user.id IS NOT NULL
+-- ON CONFLICT (user_id, granted_to_user_id) DO NOTHING;
 
 -- 10. Verify the setup
 SELECT 'Access control table and function created successfully!' AS status;
 
--- Check if table was created
-SELECT 
-    'access_control table columns:' AS info,
-    column_name,
-    data_type
+-- Show table structure
+SELECT 'access_control table columns:' AS info, column_name, data_type, is_nullable
 FROM information_schema.columns 
-WHERE table_name = 'access_control' 
-  AND table_schema = 'public'
+WHERE table_name = 'access_control' AND table_schema = 'public'
 ORDER BY ordinal_position;

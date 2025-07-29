@@ -10,7 +10,7 @@ import {
 } from '../../services/assigneeService';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../lib/supabaseClient';
-import { Plus, Users, Shield, Eye, EyeOff, UserCheck, UserX } from 'lucide-react';
+import { Plus, Users, Shield, Eye, EyeOff, UserCheck, UserX, Info, Settings } from 'lucide-react';
 
 export const AssigneeSettings: React.FC = () => {
   const { user } = useAuth();
@@ -21,29 +21,54 @@ export const AssigneeSettings: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedUserId, setSelectedUserId] = useState('');
   const [activeTab, setActiveTab] = useState<'grant' | 'granted' | 'received'>('grant');
+  const [dbUserId, setDbUserId] = useState<string | null>(null);
 
   useEffect(() => {
     if (user) {
-      fetchData();
+      fetchDbUserId();
     }
   }, [user]);
 
-  const fetchData = async () => {
+  // Get the database user ID from the auth user ID
+  const fetchDbUserId = async () => {
     if (!user) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id')
+        .eq('auth_user_id', user.id)
+        .single();
+      
+      if (error) {
+        setError(`Failed to get user database ID: ${error.message}`);
+        return;
+      }
+      
+      setDbUserId(data.id);
+      fetchData(data.id);
+    } catch (err: any) {
+      setError(`Failed to get user database ID: ${err.message}`);
+    }
+  };
+
+  const fetchData = async (userId?: string) => {
+    const currentDbUserId = userId || dbUserId;
+    if (!currentDbUserId) return;
     
     try {
       setIsLoading(true);
       
       // Get all available users for assignment
       const users = await getAssignees();
-      setAvailableUsers(users.filter(u => u.id !== user.id)); // Exclude self
+      setAvailableUsers(users.filter(u => u.id !== currentDbUserId)); // Exclude self using database ID
       
       // Get users I have granted access to my data
-      const accessGranted = await getUsersWithAccessToMyData(user.id);
+      const accessGranted = await getUsersWithAccessToMyData(currentDbUserId);
       setMyAccessGrants(accessGranted);
       
       // Get users whose data I have access to
-      const accessReceived = await getUsersIHaveAccessTo(user.id);
+      const accessReceived = await getUsersIHaveAccessTo(currentDbUserId);
       setAccessToMe(accessReceived);
       
       setError(null);
@@ -56,10 +81,10 @@ export const AssigneeSettings: React.FC = () => {
 
   const handleGrantAccess = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUserId || !user) return;
+    if (!selectedUserId || !dbUserId) return;
 
     try {
-      await addAssigneeRelationship(user.id, selectedUserId);
+      await addAssigneeRelationship(dbUserId, selectedUserId);
       setSelectedUserId('');
       await fetchData();
       setError(null);
@@ -69,9 +94,10 @@ export const AssigneeSettings: React.FC = () => {
   };
 
   const handleRevokeAccess = async (grantorId: string, granteeId: string) => {
+    if (!dbUserId) return;
     if (window.confirm('Are you sure you want to revoke this access?')) {
       try {
-        await removeAssigneeRelationship(grantorId, granteeId);
+        await removeAssigneeRelationship(dbUserId, granteeId);
         await fetchData();
         setError(null);
       } catch (err: any) {
@@ -80,10 +106,31 @@ export const AssigneeSettings: React.FC = () => {
     }
   };
   
+  // Check if current user is admin
+  const isAdmin = user?.role === 'admin';
+  
   return (
     <div className="p-6">
       <h3 className="text-lg font-medium mb-4">Manage Assignees</h3>
       {error && <div className="text-red-500 mb-4">{error}</div>}
+
+      {/* Admin Auto-Sharing Information */}
+      {isAdmin && (
+        <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="flex items-start space-x-3">
+            <Info className="w-5 h-5 text-blue-600 mt-0.5" />
+            <div>
+              <h4 className="font-semibold text-blue-900 mb-2">Admin Auto-Sharing</h4>
+              <p className="text-sm text-blue-800 mb-2">
+                As an admin, any leads or opportunities you create will be automatically shared with all users listed in the "Access I've Granted" section below.
+              </p>
+              <p className="text-xs text-blue-700">
+                This allows assigned users to immediately access and manage admin-created data without manual assignment.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="mb-6">
         <h4 className="font-semibold">Grant Data Access</h4>
